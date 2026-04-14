@@ -19,7 +19,7 @@ const TEST_QUERY = `
         nodes {
           slug
           rarityTyped
-          player {
+          anyPlayer {
             displayName
             position
           }
