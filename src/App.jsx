@@ -21,7 +21,7 @@ const TEST_QUERY = `
           rarityTyped
           anyPlayer {
             displayName
-            position
+            anyPositions
           }
         }
       }
