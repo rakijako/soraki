@@ -35,6 +35,14 @@ async function gql(query, variables = {}) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ query, variables }),
   });
+  const data = await res.json();
+  console.log("RAW API:", JSON.stringify(data));
+  return data;
+}
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query, variables }),
+  });
   return res.json();
 }
 
