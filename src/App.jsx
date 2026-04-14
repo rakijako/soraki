@@ -9,11 +9,17 @@ const SLOT_LABEL = { Goalkeeper: "Gardien", Defender: "Défenseur", Midfielder: 
 const CARDS_QUERY = `
   query UserCards($slug: String!) {
     user(slug: $slug) {
-      paginatedCards(first: 200) {
+      slug
+      cardCounts {
+        total
+      }
+      paginatedCards(first: 20) {
         nodes {
-          slug rarity
+          slug
+          rarity
           player {
-            displayName position
+            displayName
+            position
             activeClub { name }
             averageScore(type: LAST_FIFTEEN_SO5_AVERAGE_SCORE)
           }
