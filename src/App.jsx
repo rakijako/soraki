@@ -45,9 +45,9 @@ async function gql(query, variables = {}) {
 
 function normalizeCard(c) {
   const ng = c.anyPlayer?.nextGame;
+  const club = c.anyPlayer?.activeClub?.name;
   const home = ng?.homeTeam?.name;
   const away = ng?.awayTeam?.name;
-  const club = c.anyPlayer?.activeClub?.name;
   const isHome = home === club;
   const opponent = isHome ? away : home;
 
@@ -200,10 +200,13 @@ function CardChip({ card, isCaptain, onSetCaptain }) {
   if (!card) return (
     <div style={{ background: "rgba(255,255,255,0.015)", border: "1px dashed rgba(255,255,255,0.07)", borderRadius: 12, padding: "14px 18px", color: "rgba(255,255,255,0.18)", fontSize: 13, fontStyle: "italic", fontFamily: "'Share Tech Mono', monospace" }}>— aucune carte —</div>
   );
+
   const pos = card.player?.position;
   const posLabel = POS_LABEL[pos] || "EXT";
   const color = POS_COLOR[posLabel] || "#888";
   const score = card.player?.averageScore ? card.player.averageScore.toFixed(1) : "—";
+  const proj = card.player?.projectedScore ? card.player.projectedScore.toFixed(1) : null;
+  const ng = card.player?.nextGame;
   const rarityColor = { unique: "#f59e0b", super_rare: "#c084fc", rare: "#ef4444", limited: "#f97316", common: "#6b7280" }[card.rarity?.toLowerCase()] || "#6b7280";
 
   return (
@@ -212,13 +215,25 @@ function CardChip({ card, isCaptain, onSetCaptain }) {
       <span style={{ background: color + "14", color, border: `1px solid ${color}44`, borderRadius: 6, padding: "2px 8px", fontSize: 11, fontWeight: 700, fontFamily: "'Share Tech Mono', monospace", flexShrink: 0, textShadow: `0 0 8px ${color}` }}>{posLabel}</span>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ color: isCaptain ? "transparent" : "#e2e8f0", fontSize: 14, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontFamily: "'Rajdhani', sans-serif", letterSpacing: 0.5, ...(isCaptain ? { background: "linear-gradient(90deg,#ff6ec7,#4de8ff,#8a7fff,#ff9a3c,#ff6ec7)", backgroundSize: "300% auto", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", animation: "holo-shift 3s linear infinite" } : {}) }}>
-          {card.player?.displayName}{isCaptain && <span style={{ marginLeft: 6, WebkitTextFillColor: "initial", color: "#facc15" }}>👑</span>}
+          {card.player?.displayName}
+          {isCaptain && <span style={{ marginLeft: 6, WebkitTextFillColor: "initial", color: "#facc15" }}>👑</span>}
+          {card.player?.hasInjury && <span style={{ marginLeft: 6, fontSize: 11 }}>🤕</span>}
+          {card.player?.hasSuspension && <span style={{ marginLeft: 4, fontSize: 11 }}>🟥</span>}
         </div>
-        <div style={{ color: "rgba(255,255,255,0.28)", fontSize: 12, fontFamily: "'Share Tech Mono', monospace" }}>{card.player?.activeClub?.name || "—"}</div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 3, flexWrap: "wrap" }}>
+          <span style={{ color: "rgba(255,255,255,0.28)", fontSize: 12, fontFamily: "'Share Tech Mono', monospace" }}>{card.player?.activeClub?.name || "—"}</span>
+          {ng && ng.opponent && (
+            <span style={{ color: ng.isHome ? "#34d399" : "#f87171", fontSize: 11, fontFamily: "'Share Tech Mono', monospace" }}>
+              {ng.isHome ? "DOM" : "EXT"} · {ng.opponent} · {ng.date}
+            </span>
+          )}
+          {!ng && <span style={{ color: "#f87171", fontSize: 11, fontFamily: "'Share Tech Mono', monospace" }}>NG</span>}
+        </div>
       </div>
       <div style={{ textAlign: "right", flexShrink: 0 }}>
         <div style={{ fontSize: 18, fontWeight: 700, fontFamily: "'Share Tech Mono', monospace", color: "#4de8ff", textShadow: "0 0 12px rgba(77,232,255,0.6)" }}>{score}</div>
         <div style={{ color: "rgba(255,255,255,0.2)", fontSize: 10, letterSpacing: 1 }}>L15</div>
+        {proj && <div style={{ fontSize: 13, fontFamily: "'Share Tech Mono', monospace", color: "#8a7fff", marginTop: 2 }}>▶ {proj}</div>}
       </div>
     </div>
   );
@@ -321,7 +336,7 @@ export default function SorareSO5() {
       <div style={{ ...wrap, alignItems: "flex-start", paddingTop: 40, paddingBottom: 40 }}>
         <style>{CSS}</style>
         <div className="scanline-wrap"><div className="scanline" /></div>
-        <div className="holo-border" style={{ ...panel, maxWidth: 560 }}>
+        <div className="holo-border" style={{ ...panel, maxWidth: 580 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 24 }}>
             <div>
               <div style={{ fontSize: 10, letterSpacing: 4, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono', monospace", marginBottom: 6 }}>◈ SORAKI v1.0</div>
