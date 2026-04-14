@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 
 const SORARE_API = "/api/sorare";
 const POS_COLOR = { GK: "#fbbf24", DEF: "#60a5fa", MID: "#34d399", FWD: "#f87171" };
@@ -6,7 +6,17 @@ const POS_LABEL = { Goalkeeper: "GK", Defender: "DEF", Midfielder: "MID", Forwar
 const POS_SLOTS = ["Goalkeeper", "Defender", "Midfielder", "Forward", "Extra"];
 const SLOT_LABEL = { Goalkeeper: "Gardien", Defender: "Défenseur", Midfielder: "Milieu", Forward: "Attaquant", Extra: "Extra" };
 
-const CARDS_QUERY = `
+const COMPETITIONS = [
+  { label: "L1", slug: "french-ligue-1" },
+  { label: "PL", slug: "english-premier-league" },
+  { label: "Liga", slug: "spanish-laliga" },
+  { label: "Bundes", slug: "german-bundesliga" },
+  { label: "Serie A", slug: "italian-serie-a" },
+];
+
+// ─── QUERIES ──────────────────────────────────────────────────────────────────
+
+const USER_CARDS_QUERY = `
   query UserCards($slug: String!) {
     user(slug: $slug) {
       slug
@@ -15,16 +25,19 @@ const CARDS_QUERY = `
           slug
           rarityTyped
           anyPlayer {
+            slug
             displayName
             anyPositions
             activeClub { name }
-            averageScore(type: LAST_FIFTEEN_SO5_AVERAGE_SCORE)
+            averageScore(type: LAST_FIVE_SO5_AVERAGE_SCORE)
+            l15: averageScore(type: LAST_FIFTEEN_SO5_AVERAGE_SCORE)
+            l40: averageScore(type: LAST_FORTY_SO5_AVERAGE_SCORE)
+            nextClassicFixtureProjectedScore
             nextGame {
               date
               homeTeam { name }
               awayTeam { name }
             }
-            nextClassicFixtureProjectedScore
             activeInjuries { active }
             activeSuspensions { active }
           }
@@ -33,6 +46,39 @@ const CARDS_QUERY = `
     }
   }
 `;
+
+const COMPETITION_PLAYERS_QUERY = `
+  query CompetitionPlayers($slug: String!) {
+    competition(slug: $slug) {
+      clubs {
+        nodes {
+          name
+          activePlayers {
+            nodes {
+              slug
+              displayName
+              anyPositions
+              activeClub { name }
+              averageScore(type: LAST_FIVE_SO5_AVERAGE_SCORE)
+              l15: averageScore(type: LAST_FIFTEEN_SO5_AVERAGE_SCORE)
+              l40: averageScore(type: LAST_FORTY_SO5_AVERAGE_SCORE)
+              nextClassicFixtureProjectedScore
+              nextGame {
+                date
+                homeTeam { name }
+                awayTeam { name }
+              }
+              activeInjuries { active }
+              activeSuspensions { active }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
 
 async function gql(query, variables = {}) {
   const res = await fetch(SORARE_API, {
@@ -43,62 +89,84 @@ async function gql(query, variables = {}) {
   return res.json();
 }
 
-function normalizeCard(c) {
-  const ng = c.anyPlayer?.nextGame;
-  const club = c.anyPlayer?.activeClub?.name;
+function calcDScore(l5, l15, l40, proj, isHome, hasInjury, hasSuspension) {
+  if (!l15) return null;
+  let score = 0.4 * (l5 || 0) + 0.35 * (l15 || 0) + 0.15 * (l40 || 0) + 0.1 * (proj || l15 || 0);
+  if (isHome) score *= 1.05;
+  if (hasInjury || hasSuspension) score *= 0.5;
+  return Math.round(score);
+}
+
+function normalizePlayer(p, rarity = null, cardSlug = null) {
+  const ng = p?.nextGame;
+  const club = p?.activeClub?.name;
   const home = ng?.homeTeam?.name;
   const away = ng?.awayTeam?.name;
   const isHome = home === club;
-  const opponent = isHome ? away : home;
+  const opponent = ng ? (isHome ? away : home) : null;
+  const hasInjury = (p?.activeInjuries || []).some(i => i.active);
+  const hasSuspension = (p?.activeSuspensions || []).some(s => s.active);
+  const l5 = p?.averageScore || 0;
+  const l15 = p?.l15 || 0;
+  const l40 = p?.l40 || 0;
+  const proj = p?.nextClassicFixtureProjectedScore || 0;
 
   return {
-    slug: c.slug,
-    rarity: c.rarityTyped,
-    player: {
-      displayName: c.anyPlayer?.displayName,
-      position: c.anyPlayer?.anyPositions?.[0],
-      activeClub: c.anyPlayer?.activeClub,
-      averageScore: c.anyPlayer?.averageScore,
-      projectedScore: c.anyPlayer?.nextClassicFixtureProjectedScore,
-      nextGame: ng ? {
-        date: ng.date ? new Date(ng.date).toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" }) : null,
-        opponent,
-        isHome,
-      } : null,
-      hasInjury: (c.anyPlayer?.activeInjuries || []).some(i => i.active),
-      hasSuspension: (c.anyPlayer?.activeSuspensions || []).some(s => s.active),
-    },
+    slug: p?.slug,
+    cardSlug,
+    rarity,
+    displayName: p?.displayName,
+    position: p?.anyPositions?.[0],
+    club,
+    l5,
+    l15,
+    l40,
+    proj,
+    isHome,
+    opponent,
+    gameDate: ng?.date ? new Date(ng.date).toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" }) : null,
+    hasInjury,
+    hasSuspension,
+    dScore: calcDScore(l5, l15, l40, proj, isHome, hasInjury, hasSuspension),
+    inGallery: false,
   };
 }
 
-function optimizeLineup(cards) {
+function normalizeCard(c) {
+  const p = normalizePlayer(c.anyPlayer, c.rarityTyped, c.slug);
+  p.inGallery = true;
+  return p;
+}
+
+function optimizeLineup(players) {
   const byPos = { Goalkeeper: [], Defender: [], Midfielder: [], Forward: [], Extra: [] };
-  cards.forEach((c) => {
-    const pos = c.player?.position;
-    if (pos && byPos[pos]) byPos[pos].push(c);
-    if (pos && pos !== "Goalkeeper") byPos.Extra.push(c);
+  players.forEach((p) => {
+    const pos = p.position;
+    if (pos && byPos[pos]) byPos[pos].push(p);
+    if (pos && pos !== "Goalkeeper") byPos.Extra.push(p);
   });
-  Object.keys(byPos).forEach((p) =>
-    byPos[p].sort((a, b) => (b.player?.averageScore || 0) - (a.player?.averageScore || 0))
+  Object.keys(byPos).forEach((pos) =>
+    byPos[pos].sort((a, b) => (b.l15 || 0) - (a.l15 || 0))
   );
   const used = new Set();
   const lineup = {};
   for (const slot of ["Goalkeeper", "Defender", "Midfielder", "Forward"]) {
-    const pick = byPos[slot].find((c) => !used.has(c.slug));
+    const pick = byPos[slot].find((p) => !used.has(p.slug));
     if (pick) { lineup[slot] = pick; used.add(pick.slug); }
   }
-  const extra = byPos.Extra.find((c) => !used.has(c.slug));
+  const extra = byPos.Extra.find((p) => !used.has(p.slug));
   if (extra) { lineup.Extra = extra; used.add(extra.slug); }
-  const players = Object.values(lineup).filter(Boolean);
-  const sumL15 = players.reduce((s, c) => s + (c.player?.averageScore || 0), 0);
-  const clubCounts = players.reduce((acc, c) => {
-    const cl = c.player?.activeClub?.name;
-    if (cl) acc[cl] = (acc[cl] || 0) + 1;
+  const players5 = Object.values(lineup).filter(Boolean);
+  const sumL15 = players5.reduce((s, p) => s + (p.l15 || 0), 0);
+  const clubCounts = players5.reduce((acc, p) => {
+    if (p.club) acc[p.club] = (acc[p.club] || 0) + 1;
     return acc;
   }, {});
   const maxClub = Math.max(0, ...Object.values(clubCounts));
   return { lineup, sumL15, capBonus: sumL15 < 260 ? 4 : 0, multiClubBonus: maxClub <= 2 ? 2 : 0 };
 }
+
+// ─── CSS ──────────────────────────────────────────────────────────────────────
 
 const CSS = `
   @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&display=swap');
@@ -137,36 +205,45 @@ const CSS = `
     mask-composite: exclude;
     pointer-events: none;
   }
-  .card-chip {
-    background: rgba(255,255,255,0.025);
-    border-radius: 12px;
-    padding: 14px 18px;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    cursor: pointer;
-    transition: all 0.2s;
-    border: 1px solid rgba(255,255,255,0.06);
-  }
-  .card-chip:hover { background: rgba(255,255,255,0.05); transform: translateX(4px); }
-  .card-chip.captain { border-color: transparent; }
-  .rarity-filter-btn {
+  .nav-btn {
+    padding: 8px 18px;
     border-radius: 8px;
-    padding: 5px 12px;
-    font-size: 11px;
-    cursor: pointer;
+    border: 1px solid rgba(255,255,255,0.08);
+    background: transparent;
+    color: rgba(255,255,255,0.4);
     font-family: 'Share Tech Mono', monospace;
-    text-transform: uppercase;
+    font-size: 12px;
+    cursor: pointer;
     letter-spacing: 1px;
     transition: all 0.15s;
+  }
+  .nav-btn.active {
+    background: rgba(77,232,255,0.1);
+    border-color: rgba(77,232,255,0.4);
+    color: #4de8ff;
+  }
+  .filter-btn {
+    padding: 5px 12px;
+    border-radius: 8px;
     border: 1px solid rgba(255,255,255,0.08);
     background: rgba(255,255,255,0.03);
     color: rgba(255,255,255,0.3);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 11px;
+    cursor: pointer;
+    letter-spacing: 1px;
+    transition: all 0.15s;
+    text-transform: uppercase;
   }
-  .rarity-filter-btn.active {
+  .filter-btn.active {
     background: rgba(77,232,255,0.08);
     border-color: rgba(77,232,255,0.3);
     color: #4de8ff;
+  }
+  .filter-btn.gallery-on {
+    background: rgba(250,204,21,0.1);
+    border-color: rgba(250,204,21,0.4);
+    color: #facc15;
   }
   .main-btn {
     width: 100%;
@@ -193,20 +270,316 @@ const CSS = `
     background: linear-gradient(90deg, transparent, rgba(77,232,255,0.06), transparent);
     animation: scanline 6s linear infinite;
   }
-  input:focus { outline: none; border-color: rgba(77,232,255,0.4) !important; }
+  .db-table { width: 100%; border-collapse: collapse; font-family: 'Share Tech Mono', monospace; font-size: 12px; }
+  .db-table th {
+    padding: 8px 10px;
+    text-align: left;
+    color: rgba(255,255,255,0.25);
+    font-size: 10px;
+    letter-spacing: 2px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    cursor: pointer;
+    white-space: nowrap;
+    user-select: none;
+  }
+  .db-table th:hover { color: #4de8ff; }
+  .db-table th.sorted { color: #4de8ff; }
+  .db-table td {
+    padding: 10px 10px;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+    color: rgba(255,255,255,0.7);
+    white-space: nowrap;
+  }
+  .db-table tr:hover td { background: rgba(255,255,255,0.03); }
+  .db-table tr.in-gallery td { background: rgba(250,204,21,0.03); }
+  .dscore-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-weight: 700;
+    font-size: 12px;
+  }
+  input[type=text], input[type=search] {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+    padding: 8px 14px;
+    color: #e2e8f0;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 13px;
+    outline: none;
+  }
+  input[type=text]:focus, input[type=search]:focus {
+    border-color: rgba(77,232,255,0.4);
+  }
+  .rarity-filter-btn {
+    border-radius: 8px; padding: 5px 12px; font-size: 11px; cursor: pointer;
+    font-family: 'Share Tech Mono', monospace; text-transform: uppercase; letter-spacing: 1px;
+    transition: all 0.15s; border: 1px solid rgba(255,255,255,0.08);
+    background: rgba(255,255,255,0.03); color: rgba(255,255,255,0.3);
+  }
+  .rarity-filter-btn.active { background: rgba(77,232,255,0.08); border-color: rgba(77,232,255,0.3); color: #4de8ff; }
+  .card-chip {
+    background: rgba(255,255,255,0.025); border-radius: 12px; padding: 14px 18px;
+    display: flex; align-items: center; gap: 12px; cursor: pointer; transition: all 0.2s;
+    border: 1px solid rgba(255,255,255,0.06);
+  }
+  .card-chip:hover { background: rgba(255,255,255,0.05); transform: translateX(4px); }
+  .card-chip.captain { border-color: transparent; }
 `;
+
+// ─── D-SCORE BADGE ────────────────────────────────────────────────────────────
+
+function DScoreBadge({ value }) {
+  if (!value) return <span style={{ color: "rgba(255,255,255,0.2)" }}>—</span>;
+  const color = value >= 80 ? "#34d399" : value >= 60 ? "#4de8ff" : value >= 40 ? "#fbbf24" : "#f87171";
+  return (
+    <span className="dscore-badge" style={{ background: color + "18", color, border: `1px solid ${color}33` }}>
+      {value}
+    </span>
+  );
+}
+
+// ─── POS BADGE ────────────────────────────────────────────────────────────────
+
+function PosBadge({ pos }) {
+  const label = POS_LABEL[pos] || "?";
+  const color = POS_COLOR[label] || "#888";
+  return (
+    <span style={{ background: color + "18", color, border: `1px solid ${color}33`, borderRadius: 5, padding: "1px 6px", fontSize: 10, fontWeight: 700 }}>
+      {label}
+    </span>
+  );
+}
+
+// ─── DATABASE PAGE ────────────────────────────────────────────────────────────
+
+function DatabasePage({ userSlug }) {
+  const [players, setPlayers] = useState([]);
+  const [galleryMap, setGalleryMap] = useState({});
+  const [loading, setLoading] = useState(false);
+  const [loadingMsg, setLoadingMsg] = useState("");
+  const [error, setError] = useState("");
+  const [sortCol, setSortCol] = useState("dScore");
+  const [sortDir, setSortDir] = useState("desc");
+  const [posFilter, setPosFilter] = useState("all");
+  const [compFilter, setCompFilter] = useState("french-ligue-1");
+  const [search, setSearch] = useState("");
+  const [galleryOnly, setGalleryOnly] = useState(false);
+  const [slug, setSlug] = useState(userSlug || "");
+  const [slugInput, setSlugInput] = useState(userSlug || "");
+
+  const load = useCallback(async (userSlug, compSlug) => {
+    setLoading(true); setError("");
+    try {
+      // Charger la galerie en premier
+      let gallery = {};
+      if (userSlug) {
+        setLoadingMsg("Chargement de ta galerie...");
+        const gData = await gql(USER_CARDS_QUERY, { slug: userSlug.trim().toLowerCase() });
+        if (gData?.data?.user) {
+          (gData.data.user.cards?.nodes || []).forEach(c => {
+            const p = normalizeCard(c);
+            gallery[p.slug] = p;
+          });
+          setGalleryMap(gallery);
+        }
+      }
+
+      // Charger les joueurs de la compétition
+      setLoadingMsg("Chargement des joueurs...");
+      const cData = await gql(COMPETITION_PLAYERS_QUERY, { slug: compSlug });
+
+      if (cData?.errors?.length) throw new Error(cData.errors[0].message);
+
+      const clubs = cData?.data?.competition?.clubs?.nodes || [];
+      const all = [];
+      clubs.forEach(club => {
+        (club.activePlayers?.nodes || []).forEach(p => {
+          const norm = normalizePlayer(p);
+          if (gallery[norm.slug]) {
+            norm.inGallery = true;
+            norm.rarity = gallery[norm.slug].rarity;
+          }
+          all.push(norm);
+        });
+      });
+
+      setPlayers(all);
+    } catch (e) {
+      setError(e.message || "Erreur inattendue.");
+    }
+    setLoading(false); setLoadingMsg("");
+  }, []);
+
+  const handleCompFilter = (slug) => {
+    setCompFilter(slug);
+    load(slugInput, slug);
+  };
+
+  const handleSort = (col) => {
+    if (sortCol === col) setSortDir(d => d === "desc" ? "asc" : "desc");
+    else { setSortCol(col); setSortDir("desc"); }
+  };
+
+  const filtered = useMemo(() => {
+    let list = [...players];
+    if (galleryOnly) list = list.filter(p => p.inGallery);
+    if (posFilter !== "all") list = list.filter(p => p.position === posFilter);
+    if (search) list = list.filter(p =>
+      p.displayName?.toLowerCase().includes(search.toLowerCase()) ||
+      p.club?.toLowerCase().includes(search.toLowerCase())
+    );
+    list.sort((a, b) => {
+      const va = a[sortCol] ?? -1;
+      const vb = b[sortCol] ?? -1;
+      return sortDir === "desc" ? vb - va : va - vb;
+    });
+    return list.slice(0, 100);
+  }, [players, galleryOnly, posFilter, search, sortCol, sortDir]);
+
+  const wrap = { minHeight: "100vh", background: "#04060f", fontFamily: "'Rajdhani', sans-serif", padding: "0 0 40px" };
+
+  return (
+    <div style={wrap}>
+      <style>{CSS}</style>
+      <div className="scanline-wrap"><div className="scanline" /></div>
+
+      {/* Header */}
+      <div style={{ padding: "20px 24px 0", position: "relative", zIndex: 1 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
+          <span className="holo-text" style={{ fontSize: 22, fontWeight: 700, letterSpacing: 2 }}>DATABASE</span>
+          <span style={{ color: "rgba(255,255,255,0.2)", fontSize: 12, fontFamily: "'Share Tech Mono', monospace" }}>{players.length} joueurs</span>
+          <div style={{ flex: 1 }} />
+          <input
+            type="search"
+            placeholder="Joueur ou club..."
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            style={{ width: 200 }}
+          />
+        </div>
+
+        {/* Slug input */}
+        <div style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "center", flexWrap: "wrap" }}>
+          <input
+            type="text"
+            placeholder="ton slug Sorare (optionnel)"
+            value={slugInput}
+            onChange={e => setSlugInput(e.target.value)}
+            style={{ width: 220 }}
+          />
+          <button
+            className="filter-btn"
+            onClick={() => { setSlug(slugInput); load(slugInput, compFilter); }}
+            style={{ padding: "8px 16px" }}
+          >
+            {loading ? "..." : "Charger"}
+          </button>
+          <button
+            className={`filter-btn ${galleryOnly ? "gallery-on" : ""}`}
+            onClick={() => setGalleryOnly(g => !g)}
+          >
+            ★ Ma galerie {Object.keys(galleryMap).length > 0 ? `(${Object.keys(galleryMap).length})` : ""}
+          </button>
+        </div>
+
+        {/* Compétition */}
+        <div style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
+          {COMPETITIONS.map(c => (
+            <button key={c.slug} className={`filter-btn ${compFilter === c.slug ? "active" : ""}`}
+              onClick={() => handleCompFilter(c.slug)}>
+              {c.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Poste */}
+        <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
+          {["all", "Goalkeeper", "Defender", "Midfielder", "Forward"].map(p => (
+            <button key={p} className={`filter-btn ${posFilter === p ? "active" : ""}`}
+              onClick={() => setPosFilter(p)}>
+              {p === "all" ? "Tous" : POS_LABEL[p]}
+            </button>
+          ))}
+        </div>
+
+        {error && <div style={{ color: "#fca5a5", fontSize: 13, fontFamily: "'Share Tech Mono', monospace", marginBottom: 12 }}>{error}</div>}
+        {loadingMsg && <div style={{ color: "#4de8ff", fontSize: 12, fontFamily: "'Share Tech Mono', monospace", marginBottom: 12 }}>{loadingMsg}</div>}
+      </div>
+
+      {/* Table */}
+      {!loading && players.length === 0 && (
+        <div style={{ textAlign: "center", paddingTop: 60, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono', monospace", fontSize: 13 }}>
+          Sélectionne une compétition et clique sur Charger
+        </div>
+      )}
+
+      {players.length > 0 && (
+        <div style={{ overflowX: "auto", padding: "0 24px", position: "relative", zIndex: 1 }}>
+          <table className="db-table">
+            <thead>
+              <tr>
+                <th>Joueur</th>
+                <th>Pos</th>
+                <th>Club</th>
+                <th className={sortCol === "l5" ? "sorted" : ""} onClick={() => handleSort("l5")}>L5 {sortCol === "l5" ? (sortDir === "desc" ? "↓" : "↑") : ""}</th>
+                <th className={sortCol === "l15" ? "sorted" : ""} onClick={() => handleSort("l15")}>L15 {sortCol === "l15" ? (sortDir === "desc" ? "↓" : "↑") : ""}</th>
+                <th className={sortCol === "l40" ? "sorted" : ""} onClick={() => handleSort("l40")}>L40 {sortCol === "l40" ? (sortDir === "desc" ? "↓" : "↑") : ""}</th>
+                <th>Match</th>
+                <th className={sortCol === "proj" ? "sorted" : ""} onClick={() => handleSort("proj")}>Proj {sortCol === "proj" ? (sortDir === "desc" ? "↓" : "↑") : ""}</th>
+                <th className={sortCol === "dScore" ? "sorted" : ""} onClick={() => handleSort("dScore")}>D-Score {sortCol === "dScore" ? (sortDir === "desc" ? "↓" : "↑") : ""}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((p, i) => (
+                <tr key={p.slug || i} className={p.inGallery ? "in-gallery" : ""}>
+                  <td>
+                    <span style={{ color: p.hasInjury || p.hasSuspension ? "#f87171" : "#e2e8f0", fontFamily: "'Rajdhani', sans-serif", fontSize: 14, fontWeight: 600 }}>
+                      {p.inGallery && <span style={{ color: "#facc15", marginRight: 4 }}>★</span>}
+                      {p.displayName}
+                      {p.hasInjury && <span style={{ marginLeft: 4 }}>🤕</span>}
+                      {p.hasSuspension && <span style={{ marginLeft: 4 }}>🟥</span>}
+                    </span>
+                  </td>
+                  <td><PosBadge pos={p.position} /></td>
+                  <td style={{ color: "rgba(255,255,255,0.4)", fontSize: 11 }}>{p.club}</td>
+                  <td style={{ color: "#4de8ff" }}>{p.l5 ? p.l5.toFixed(0) : "—"}</td>
+                  <td style={{ color: "#4de8ff", fontWeight: 700 }}>{p.l15 ? p.l15.toFixed(0) : "—"}</td>
+                  <td style={{ color: "rgba(77,232,255,0.5)" }}>{p.l40 ? p.l40.toFixed(0) : "—"}</td>
+                  <td style={{ fontSize: 11 }}>
+                    {p.opponent ? (
+                      <span>
+                        <span style={{ color: p.isHome ? "#34d399" : "#f87171" }}>{p.isHome ? "DOM" : "EXT"}</span>
+                        <span style={{ color: "rgba(255,255,255,0.3)", margin: "0 4px" }}>·</span>
+                        <span style={{ color: "rgba(255,255,255,0.5)" }}>{p.opponent}</span>
+                        <span style={{ color: "rgba(255,255,255,0.2)", marginLeft: 4 }}>{p.gameDate}</span>
+                      </span>
+                    ) : <span style={{ color: "#f87171" }}>NG</span>}
+                  </td>
+                  <td style={{ color: "#8a7fff" }}>{p.proj ? `▶ ${p.proj.toFixed(0)}` : "—"}</td>
+                  <td><DScoreBadge value={p.dScore} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── SO5 OPTIMIZER PAGE ───────────────────────────────────────────────────────
 
 function CardChip({ card, isCaptain, onSetCaptain }) {
   if (!card) return (
     <div style={{ background: "rgba(255,255,255,0.015)", border: "1px dashed rgba(255,255,255,0.07)", borderRadius: 12, padding: "14px 18px", color: "rgba(255,255,255,0.18)", fontSize: 13, fontStyle: "italic", fontFamily: "'Share Tech Mono', monospace" }}>— aucune carte —</div>
   );
-
-  const pos = card.player?.position;
+  const pos = card.position;
   const posLabel = POS_LABEL[pos] || "EXT";
   const color = POS_COLOR[posLabel] || "#888";
-  const score = card.player?.averageScore ? card.player.averageScore.toFixed(1) : "—";
-  const proj = card.player?.projectedScore ? card.player.projectedScore.toFixed(1) : null;
-  const ng = card.player?.nextGame;
+  const score = card.l15 ? card.l15.toFixed(1) : "—";
+  const proj = card.proj ? card.proj.toFixed(1) : null;
   const rarityColor = { unique: "#f59e0b", super_rare: "#c084fc", rare: "#ef4444", limited: "#f97316", common: "#6b7280" }[card.rarity?.toLowerCase()] || "#6b7280";
 
   return (
@@ -215,19 +588,18 @@ function CardChip({ card, isCaptain, onSetCaptain }) {
       <span style={{ background: color + "14", color, border: `1px solid ${color}44`, borderRadius: 6, padding: "2px 8px", fontSize: 11, fontWeight: 700, fontFamily: "'Share Tech Mono', monospace", flexShrink: 0, textShadow: `0 0 8px ${color}` }}>{posLabel}</span>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ color: isCaptain ? "transparent" : "#e2e8f0", fontSize: 14, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontFamily: "'Rajdhani', sans-serif", letterSpacing: 0.5, ...(isCaptain ? { background: "linear-gradient(90deg,#ff6ec7,#4de8ff,#8a7fff,#ff9a3c,#ff6ec7)", backgroundSize: "300% auto", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", animation: "holo-shift 3s linear infinite" } : {}) }}>
-          {card.player?.displayName}
-          {isCaptain && <span style={{ marginLeft: 6, WebkitTextFillColor: "initial", color: "#facc15" }}>👑</span>}
-          {card.player?.hasInjury && <span style={{ marginLeft: 6, fontSize: 11 }}>🤕</span>}
-          {card.player?.hasSuspension && <span style={{ marginLeft: 4, fontSize: 11 }}>🟥</span>}
+          {card.displayName}{isCaptain && <span style={{ marginLeft: 6, WebkitTextFillColor: "initial", color: "#facc15" }}>👑</span>}
+          {card.hasInjury && <span style={{ marginLeft: 6 }}>🤕</span>}
+          {card.hasSuspension && <span style={{ marginLeft: 4 }}>🟥</span>}
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 3, flexWrap: "wrap" }}>
-          <span style={{ color: "rgba(255,255,255,0.28)", fontSize: 12, fontFamily: "'Share Tech Mono', monospace" }}>{card.player?.activeClub?.name || "—"}</span>
-          {ng && ng.opponent && (
-            <span style={{ color: ng.isHome ? "#34d399" : "#f87171", fontSize: 11, fontFamily: "'Share Tech Mono', monospace" }}>
-              {ng.isHome ? "DOM" : "EXT"} · {ng.opponent} · {ng.date}
+          <span style={{ color: "rgba(255,255,255,0.28)", fontSize: 12, fontFamily: "'Share Tech Mono', monospace" }}>{card.club || "—"}</span>
+          {card.opponent && (
+            <span style={{ color: card.isHome ? "#34d399" : "#f87171", fontSize: 11, fontFamily: "'Share Tech Mono', monospace" }}>
+              {card.isHome ? "DOM" : "EXT"} · {card.opponent} · {card.gameDate}
             </span>
           )}
-          {!ng && <span style={{ color: "#f87171", fontSize: 11, fontFamily: "'Share Tech Mono', monospace" }}>NG</span>}
+          {!card.opponent && <span style={{ color: "#f87171", fontSize: 11, fontFamily: "'Share Tech Mono', monospace" }}>NG</span>}
         </div>
       </div>
       <div style={{ textAlign: "right", flexShrink: 0 }}>
@@ -248,7 +620,7 @@ function BonusBadge({ label, value, active }) {
   );
 }
 
-export default function SorareSO5() {
+function OptimizerPage() {
   const [slug, setSlug] = useState("");
   const [step, setStep] = useState("home");
   const [error, setError] = useState("");
@@ -258,15 +630,12 @@ export default function SorareSO5() {
   const [rarityFilter, setRarityFilter] = useState("all");
 
   const run = useCallback(async (currentSlug, filter) => {
-    setError("");
-    setStep("loading");
+    setError(""); setStep("loading");
     try {
-      const data = await gql(CARDS_QUERY, { slug: currentSlug.trim().toLowerCase() });
+      const data = await gql(USER_CARDS_QUERY, { slug: currentSlug.trim().toLowerCase() });
       if (data?.errors?.length) throw new Error(data.errors[0].message);
       if (!data?.data?.user) throw new Error("Slug introuvable — vérifie ton pseudo Sorare.");
-      const raw = (data.data.user.cards?.nodes || [])
-        .map(normalizeCard)
-        .filter(c => c.player?.position && c.player?.displayName);
+      const raw = (data.data.user.cards?.nodes || []).map(normalizeCard).filter(c => c.position && c.displayName);
       if (!raw.length) throw new Error("Aucune carte trouvée pour ce compte.");
       setCards(raw);
       const filtered = filter === "all" ? raw : raw.filter(c => c.rarity?.toLowerCase() === filter);
@@ -275,8 +644,7 @@ export default function SorareSO5() {
       setCaptain(res.lineup["Forward"]?.slug || res.lineup["Midfielder"]?.slug || null);
       setStep("result");
     } catch (e) {
-      setError(e.message || "Erreur inattendue.");
-      setStep("home");
+      setError(e.message || "Erreur inattendue."); setStep("home");
     }
   }, []);
 
@@ -293,19 +661,15 @@ export default function SorareSO5() {
 
   if (step === "home") return (
     <div style={wrap}>
-      <style>{CSS}</style>
-      <div className="scanline-wrap"><div className="scanline" /></div>
       <div className="holo-border" style={panel}>
         <div style={{ marginBottom: 28 }}>
           <div style={{ fontSize: 11, letterSpacing: 5, color: "rgba(255,255,255,0.25)", fontFamily: "'Share Tech Mono', monospace", marginBottom: 8 }}>◈ SORAKI v1.0</div>
           <h1 className="holo-text" style={{ fontSize: 38, fontWeight: 700, lineHeight: 1, letterSpacing: 2 }}>SO5 OPTIMIZER</h1>
           <div style={{ fontSize: 14, color: "rgba(255,255,255,0.28)", marginTop: 8, fontFamily: "'Share Tech Mono', monospace", lineHeight: 1.6 }}>Génère ta compo optimale sans mot de passe</div>
         </div>
-        {error && (
-          <div style={{ background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 10, padding: "12px 16px", color: "#fca5a5", fontSize: 13, marginBottom: 16, fontFamily: "'Share Tech Mono', monospace" }}>{error}</div>
-        )}
+        {error && <div style={{ background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 10, padding: "12px 16px", color: "#fca5a5", fontSize: 13, marginBottom: 16, fontFamily: "'Share Tech Mono', monospace" }}>{error}</div>}
         <div style={{ fontSize: 11, color: "rgba(255,255,255,0.25)", marginBottom: 8, letterSpacing: 3, fontFamily: "'Share Tech Mono', monospace" }}>SLUG SORARE</div>
-        <input
+        <input type="text"
           style={{ width: "100%", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 10, padding: "13px 16px", color: "#e2e8f0", fontSize: 15, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 1, transition: "border-color 0.2s" }}
           placeholder="ex: rakijako"
           value={slug}
@@ -313,17 +677,13 @@ export default function SorareSO5() {
           onKeyDown={e => e.key === "Enter" && slug.trim() && run(slug, rarityFilter)}
         />
         <div style={{ fontSize: 11, color: "rgba(255,255,255,0.18)", marginTop: 8, fontFamily: "'Share Tech Mono', monospace" }}>→ pseudo visible dans l'URL de ton profil Sorare</div>
-        <button className="main-btn" style={{ marginTop: 20 }} disabled={!slug.trim()} onClick={() => run(slug, rarityFilter)}>
-          Analyser ma galerie →
-        </button>
+        <button className="main-btn" style={{ marginTop: 20 }} disabled={!slug.trim()} onClick={() => run(slug, rarityFilter)}>Analyser ma galerie →</button>
       </div>
     </div>
   );
 
   if (step === "loading") return (
     <div style={{ ...wrap, flexDirection: "column", gap: 20 }}>
-      <style>{CSS}</style>
-      <div className="scanline-wrap"><div className="scanline" /></div>
       <div style={{ width: 44, height: 44, border: "2px solid rgba(255,255,255,0.05)", borderTop: "2px solid #4de8ff", borderRadius: "50%", animation: "spin 0.7s linear infinite", boxShadow: "0 0 20px rgba(77,232,255,0.3)" }} />
       <div className="holo-text" style={{ fontSize: 13, letterSpacing: 3, fontFamily: "'Share Tech Mono', monospace" }}>ANALYSE EN COURS</div>
     </div>
@@ -334,8 +694,6 @@ export default function SorareSO5() {
     const totalBonus = capBonus + multiClubBonus;
     return (
       <div style={{ ...wrap, alignItems: "flex-start", paddingTop: 40, paddingBottom: 40 }}>
-        <style>{CSS}</style>
-        <div className="scanline-wrap"><div className="scanline" /></div>
         <div className="holo-border" style={{ ...panel, maxWidth: 580 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 24 }}>
             <div>
@@ -376,6 +734,28 @@ export default function SorareSO5() {
       </div>
     );
   }
-
   return null;
+}
+
+// ─── APP ROOT ─────────────────────────────────────────────────────────────────
+
+export default function App() {
+  const [page, setPage] = useState("optimizer");
+
+  return (
+    <div style={{ background: "#04060f", minHeight: "100vh" }}>
+      <style>{CSS}</style>
+
+      {/* NAV */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 24px", borderBottom: "1px solid rgba(255,255,255,0.05)", position: "sticky", top: 0, background: "rgba(4,6,15,0.95)", backdropFilter: "blur(20px)", zIndex: 100 }}>
+        <span className="holo-text" style={{ fontSize: 16, fontWeight: 700, letterSpacing: 3, marginRight: 8 }}>◈ SORAKI</span>
+        <button className={`nav-btn ${page === "optimizer" ? "active" : ""}`} onClick={() => setPage("optimizer")}>SO5 OPTIMIZER</button>
+        <button className={`nav-btn ${page === "database" ? "active" : ""}`} onClick={() => setPage("database")}>DATABASE</button>
+      </div>
+
+      {/* PAGES */}
+      {page === "optimizer" && <OptimizerPage />}
+      {page === "database" && <DatabasePage />}
+    </div>
+  );
 }
