@@ -18,7 +18,7 @@ const TEST_QUERY = `
       cards(first: 5) {
         nodes {
           slug
-          rarity
+          rarityTyped
           player {
             displayName
             position
