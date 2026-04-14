@@ -305,7 +305,7 @@ export default function SorareSO5() {
   const run = useCallback(async (currentSlug, filter) => {
     setError(""); setStep("loading");
     try {
-      const data = await gql(CARDS_QUERY, { slug: currentSlug.trim().toLowerCase() });
+      console.log("API response:", JSON.stringify(data));
       if (!data?.data?.user) throw new Error("Slug introuvable — vérifie ton pseudo Sorare.");
       const raw = data.data.user.paginatedCards.nodes.filter(c => c.player?.position && c.player?.displayName);
       if (!raw.length) throw new Error("Aucune carte trouvée pour ce compte.");
