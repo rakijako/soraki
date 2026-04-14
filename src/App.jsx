@@ -44,6 +44,13 @@ async function gql(query, variables = {}) {
 }
 
 function normalizeCard(c) {
+  const ng = c.anyPlayer?.nextGame;
+  const home = ng?.homeTeam?.name;
+  const away = ng?.awayTeam?.name;
+  const club = c.anyPlayer?.activeClub?.name;
+  const isHome = home === club;
+  const opponent = isHome ? away : home;
+
   return {
     slug: c.slug,
     rarity: c.rarityTyped,
@@ -52,6 +59,14 @@ function normalizeCard(c) {
       position: c.anyPlayer?.anyPositions?.[0],
       activeClub: c.anyPlayer?.activeClub,
       averageScore: c.anyPlayer?.averageScore,
+      projectedScore: c.anyPlayer?.nextClassicFixtureProjectedScore,
+      nextGame: ng ? {
+        date: ng.date ? new Date(ng.date).toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" }) : null,
+        opponent,
+        isHome,
+      } : null,
+      hasInjury: (c.anyPlayer?.activeInjuries || []).some(i => i.active),
+      hasSuspension: (c.anyPlayer?.activeSuspensions || []).some(s => s.active),
     },
   };
 }
