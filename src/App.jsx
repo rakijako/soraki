@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 
-const SORARE_API = "https://api.sorare.com/federation/graphql";
+const SORARE_API = "/api/sorare";
 const POS_COLOR = { GK: "#fbbf24", DEF: "#60a5fa", MID: "#34d399", FWD: "#f87171" };
 const POS_LABEL = { Goalkeeper: "GK", Defender: "DEF", Midfielder: "MID", Forward: "FWD" };
 const POS_SLOTS = ["Goalkeeper", "Defender", "Midfielder", "Forward", "Extra"];
