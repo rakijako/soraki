@@ -19,6 +19,14 @@ const CARDS_QUERY = `
             anyPositions
             activeClub { name }
             averageScore(type: LAST_FIFTEEN_SO5_AVERAGE_SCORE)
+            nextGame {
+              date
+              homeTeam { name }
+              awayTeam { name }
+            }
+            nextClassicFixtureProjectedScore
+            activeInjuries { active }
+            activeSuspensions { active }
           }
         }
       }
