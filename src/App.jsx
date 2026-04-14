@@ -22,6 +22,8 @@ const TEST_QUERY = `
           anyPlayer {
             displayName
             anyPositions
+            activeClub { name }
+            averageScore(type: LAST_FIFTEEN_SO5_AVERAGE_SCORE)
           }
         }
       }
