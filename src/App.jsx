@@ -10,7 +10,7 @@ const CARDS_QUERY = `
   query UserCards($slug: String!) {
     user(slug: $slug) {
       slug
-      cards(first: 100) {
+      cards(first: 20) {
         nodes {
           slug
           rarityTyped
