@@ -1,23 +1,51 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useEffect } from "react";
 
 const SORARE_API = "/api/sorare";
 const POS_COLOR = { GK: "#fbbf24", DEF: "#60a5fa", MID: "#34d399", FWD: "#f87171" };
 const POS_LABEL = { Goalkeeper: "GK", Defender: "DEF", Midfielder: "MID", Forward: "FWD" };
 const POS_SLOTS = ["Goalkeeper", "Defender", "Midfielder", "Forward", "Extra"];
 const SLOT_LABEL = { Goalkeeper: "Gardien", Defender: "Défenseur", Midfielder: "Milieu", Forward: "Attaquant", Extra: "Extra" };
+const LS_KEY = "soraki_projection_history";
 
 const MODELS = [
-  { id: "M1", label: "Baseline",     color: "#888780", desc: "L15 uniquement" },
-  { id: "M2", label: "Forme",        color: "#378ADD", desc: "60% L5 + 40% L15" },
-  { id: "M3", label: "Sorare",       color: "#1D9E75", desc: "Projection officielle Sorare" },
-  { id: "M4", label: "Localisation", color: "#BA7517", desc: "L15 × bonus domicile" },
-  { id: "M5", label: "Composite",    color: "#7F77DD", desc: "Tous facteurs combinés" },
-  { id: "M6", label: "Tendance",     color: "#639922", desc: "L15 + momentum L5-L15" },
+  { id: "M1", label: "Baseline",     color: "#888780" },
+  { id: "M2", label: "Forme",        color: "#378ADD" },
+  { id: "M3", label: "Sorare",       color: "#1D9E75" },
+  { id: "M4", label: "Localisation", color: "#BA7517" },
+  { id: "M5", label: "Composite",    color: "#7F77DD" },
+  { id: "M6", label: "Tendance",     color: "#639922" },
 ];
+
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
+
+// Retourne la clé de semaine ISO : "2026-W15"
+function getISOWeekKey(date = new Date()) {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + 3 - ((d.getDay() + 6) % 7));
+  const week1 = new Date(d.getFullYear(), 0, 4);
+  const weekNum = 1 + Math.round(((d - week1) / 86400000 - 3 + ((week1.getDay() + 6) % 7)) / 7);
+  return `${d.getFullYear()}-W${String(weekNum).padStart(2, "0")}`;
+}
+
+// localStorage helpers
+function loadHistory() {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+
+function saveHistory(history) {
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify(history));
+  } catch (e) {
+    console.warn("localStorage plein ou indisponible", e);
+  }
+}
 
 // ─── QUERIES ──────────────────────────────────────────────────────────────────
 
-// On récupère sport sur la carte pour filtrer football uniquement
 const USER_CARDS_QUERY = `
   query UserCards($slug: String!) {
     user(slug: $slug) {
@@ -48,7 +76,6 @@ const USER_CARDS_QUERY = `
   }
 `;
 
-// Scores réels après GW - sans champ game (non dispo sur interface)
 const REAL_SCORES_QUERY = `
   query RealScores($slug: String!) {
     user(slug: $slug) {
@@ -67,7 +94,7 @@ const REAL_SCORES_QUERY = `
   }
 `;
 
-// ─── HELPERS ──────────────────────────────────────────────────────────────────
+// ─── NORMALIZE ────────────────────────────────────────────────────────────────
 
 async function gql(query, variables = {}) {
   const res = await fetch(SORARE_API, {
@@ -94,17 +121,10 @@ function normalizeCard(c) {
   const variation = ((slugHash % 20) - 10) / 100;
   const l5 = Math.max(0, l15 * (1 + variation));
   const l40 = Math.max(0, l15 * (1 - variation * 0.5));
-
   return {
-    slug: p?.slug,
-    cardSlug: c.slug,
-    rarity: c.rarityTyped,
-    sport: c.sport,
-    displayName: p?.displayName,
-    position: p?.anyPositions?.[0],
-    club,
-    l5, l15, l40, proj,
-    isHome, opponent,
+    slug: p?.slug, cardSlug: c.slug, rarity: c.rarityTyped, sport: c.sport,
+    displayName: p?.displayName, position: p?.anyPositions?.[0], club,
+    l5, l15, l40, proj, isHome, opponent,
     gameDate: ng?.date ? new Date(ng.date).toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" }) : null,
     hasInjury, hasSuspension,
   };
@@ -113,15 +133,15 @@ function normalizeCard(c) {
 function computeModels(player) {
   const { l5, l15, l40, proj, isHome, hasInjury, hasSuspension } = player;
   if (!l15) return null;
-  const domBonus = isHome ? 1.05 : 1.0;
-  const injMalus = (hasInjury || hasSuspension) ? 0.5 : 1.0;
+  const dom = isHome ? 1.05 : 1.0;
+  const inj = (hasInjury || hasSuspension) ? 0.5 : 1.0;
   return {
     M1: Math.round(l15),
     M2: Math.round(0.6 * l5 + 0.4 * l15),
     M3: Math.round(proj || l15),
-    M4: Math.round(l15 * domBonus * injMalus),
-    M5: Math.round((0.4 * l5 + 0.35 * l15 + 0.15 * l40 + 0.1 * (proj || l15)) * domBonus * injMalus),
-    M6: Math.round((l15 + 0.4 * (l5 - l15)) * injMalus),
+    M4: Math.round(l15 * dom * inj),
+    M5: Math.round((0.4 * l5 + 0.35 * l15 + 0.15 * l40 + 0.1 * (proj || l15)) * dom * inj),
+    M6: Math.round((l15 + 0.4 * (l5 - l15)) * inj),
   };
 }
 
@@ -132,9 +152,7 @@ function optimizeLineup(players) {
     if (pos && byPos[pos]) byPos[pos].push(p);
     if (pos && pos !== "Goalkeeper") byPos.Extra.push(p);
   });
-  Object.keys(byPos).forEach((pos) =>
-    byPos[pos].sort((a, b) => (b.l15 || 0) - (a.l15 || 0))
-  );
+  Object.keys(byPos).forEach((pos) => byPos[pos].sort((a, b) => (b.l15 || 0) - (a.l15 || 0)));
   const used = new Set();
   const lineup = {};
   for (const slot of ["Goalkeeper", "Defender", "Midfielder", "Forward"]) {
@@ -145,10 +163,7 @@ function optimizeLineup(players) {
   if (extra) { lineup.Extra = extra; used.add(extra.slug); }
   const players5 = Object.values(lineup).filter(Boolean);
   const sumL15 = players5.reduce((s, p) => s + (p.l15 || 0), 0);
-  const clubCounts = players5.reduce((acc, p) => {
-    if (p.club) acc[p.club] = (acc[p.club] || 0) + 1;
-    return acc;
-  }, {});
+  const clubCounts = players5.reduce((acc, p) => { if (p.club) acc[p.club] = (acc[p.club] || 0) + 1; return acc; }, {});
   const maxClub = Math.max(0, ...Object.values(clubCounts));
   return { lineup, sumL15, capBonus: sumL15 < 260 ? 4 : 0, multiClubBonus: maxClub <= 2 ? 2 : 0 };
 }
@@ -159,108 +174,48 @@ const CSS = `
   @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&display=swap');
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: #04060f; }
-  @keyframes holo-shift {
-    0%   { background-position: 0% 50%; }
-    50%  { background-position: 100% 50%; }
-    100% { background-position: 0% 50%; }
-  }
+  @keyframes holo-shift { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
   @keyframes spin { to { transform: rotate(360deg); } }
-  @keyframes scanline {
-    0%   { transform: translateY(-100%); }
-    100% { transform: translateY(100vh); }
-  }
+  @keyframes scanline { 0% { transform: translateY(-100%); } 100% { transform: translateY(100vh); } }
   .holo-text {
     background: linear-gradient(90deg, #ff6ec7, #ff9a3c, #ffe84d, #7dff6b, #4de8ff, #8a7fff, #ff6ec7, #ff9a3c);
-    background-size: 300% auto;
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-    animation: holo-shift 4s linear infinite;
+    background-size: 300% auto; -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text; animation: holo-shift 4s linear infinite;
   }
   .holo-border { position: relative; }
   .holo-border::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    padding: 1px;
+    content: ''; position: absolute; inset: 0; border-radius: inherit; padding: 1px;
     background: linear-gradient(135deg, #ff6ec7, #4de8ff, #8a7fff, #ff9a3c, #ff6ec7);
-    background-size: 300% auto;
-    animation: holo-shift 3s linear infinite;
-    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-    -webkit-mask-composite: xor;
-    mask-composite: exclude;
-    pointer-events: none;
-  }
-  .nav-btn {
-    padding: 8px 18px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);
-    background: transparent; color: rgba(255,255,255,0.4);
-    font-family: 'Share Tech Mono', monospace; font-size: 12px; cursor: pointer;
-    letter-spacing: 1px; transition: all 0.15s;
-  }
-  .nav-btn.active { background: rgba(77,232,255,0.1); border-color: rgba(77,232,255,0.4); color: #4de8ff; }
-  .main-btn {
-    width: 100%; border: none; border-radius: 12px; padding: 15px;
-    font-size: 15px; font-weight: 700; cursor: pointer;
-    font-family: 'Rajdhani', sans-serif; letter-spacing: 2px; text-transform: uppercase;
-    background: linear-gradient(135deg, #ff6ec7, #4de8ff, #8a7fff, #ff9a3c);
     background-size: 300% auto; animation: holo-shift 3s linear infinite;
-    color: #04060f; transition: opacity 0.2s;
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor; mask-composite: exclude; pointer-events: none;
   }
+  .nav-btn { padding: 8px 18px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08); background: transparent; color: rgba(255,255,255,0.4); font-family: 'Share Tech Mono', monospace; font-size: 12px; cursor: pointer; letter-spacing: 1px; transition: all 0.15s; }
+  .nav-btn.active { background: rgba(77,232,255,0.1); border-color: rgba(77,232,255,0.4); color: #4de8ff; }
+  .main-btn { width: 100%; border: none; border-radius: 12px; padding: 15px; font-size: 15px; font-weight: 700; cursor: pointer; font-family: 'Rajdhani', sans-serif; letter-spacing: 2px; text-transform: uppercase; background: linear-gradient(135deg, #ff6ec7, #4de8ff, #8a7fff, #ff9a3c); background-size: 300% auto; animation: holo-shift 3s linear infinite; color: #04060f; transition: opacity 0.2s; }
   .main-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-  .action-btn {
-    border: none; border-radius: 10px; padding: 10px 18px;
-    font-size: 13px; font-weight: 700; cursor: pointer;
-    font-family: 'Share Tech Mono', monospace; letter-spacing: 1px; transition: all 0.15s;
-  }
+  .action-btn { border: none; border-radius: 10px; padding: 10px 18px; font-size: 13px; font-weight: 700; cursor: pointer; font-family: 'Share Tech Mono', monospace; letter-spacing: 1px; transition: all 0.15s; }
   .action-btn.green { background: rgba(52,211,153,0.12); color: #34d399; border: 1px solid rgba(52,211,153,0.3); }
   .action-btn.green:hover { background: rgba(52,211,153,0.2); }
   .action-btn.gray { background: rgba(255,255,255,0.04); color: rgba(255,255,255,0.4); border: 1px solid rgba(255,255,255,0.08); }
+  .action-btn.red { background: rgba(239,68,68,0.08); color: #f87171; border: 1px solid rgba(239,68,68,0.2); }
   .action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-  .filter-btn {
-    padding: 5px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);
-    background: rgba(255,255,255,0.03); color: rgba(255,255,255,0.3);
-    font-family: 'Share Tech Mono', monospace; font-size: 11px; cursor: pointer;
-    letter-spacing: 1px; transition: all 0.15s; text-transform: uppercase;
-  }
+  .filter-btn { padding: 5px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03); color: rgba(255,255,255,0.3); font-family: 'Share Tech Mono', monospace; font-size: 11px; cursor: pointer; letter-spacing: 1px; transition: all 0.15s; text-transform: uppercase; }
   .filter-btn.active { background: rgba(77,232,255,0.08); border-color: rgba(77,232,255,0.3); color: #4de8ff; }
   .scanline-wrap { position: fixed; inset: 0; pointer-events: none; overflow: hidden; z-index: 0; }
-  .scanline {
-    position: absolute; left: 0; right: 0; height: 2px;
-    background: linear-gradient(90deg, transparent, rgba(77,232,255,0.06), transparent);
-    animation: scanline 6s linear infinite;
-  }
-  .soraki-input {
-    background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 8px; padding: 8px 14px; color: #e2e8f0;
-    font-family: 'Share Tech Mono', monospace; font-size: 13px; outline: none;
-  }
+  .scanline { position: absolute; left: 0; right: 0; height: 2px; background: linear-gradient(90deg, transparent, rgba(77,232,255,0.06), transparent); animation: scanline 6s linear infinite; }
+  .soraki-input { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 8px 14px; color: #e2e8f0; font-family: 'Share Tech Mono', monospace; font-size: 13px; outline: none; }
   .soraki-input:focus { border-color: rgba(77,232,255,0.4); }
-  .rarity-filter-btn {
-    border-radius: 8px; padding: 5px 12px; font-size: 11px; cursor: pointer;
-    font-family: 'Share Tech Mono', monospace; text-transform: uppercase; letter-spacing: 1px;
-    transition: all 0.15s; border: 1px solid rgba(255,255,255,0.08);
-    background: rgba(255,255,255,0.03); color: rgba(255,255,255,0.3);
-  }
+  .rarity-filter-btn { border-radius: 8px; padding: 5px 12px; font-size: 11px; cursor: pointer; font-family: 'Share Tech Mono', monospace; text-transform: uppercase; letter-spacing: 1px; transition: all 0.15s; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03); color: rgba(255,255,255,0.3); }
   .rarity-filter-btn.active { background: rgba(77,232,255,0.08); border-color: rgba(77,232,255,0.3); color: #4de8ff; }
-  .card-chip {
-    background: rgba(255,255,255,0.025); border-radius: 12px; padding: 14px 18px;
-    display: flex; align-items: center; gap: 12px; cursor: pointer; transition: all 0.2s;
-    border: 1px solid rgba(255,255,255,0.06);
-  }
+  .card-chip { background: rgba(255,255,255,0.025); border-radius: 12px; padding: 14px 18px; display: flex; align-items: center; gap: 12px; cursor: pointer; transition: all 0.2s; border: 1px solid rgba(255,255,255,0.06); }
   .card-chip:hover { background: rgba(255,255,255,0.05); transform: translateX(4px); }
   .card-chip.captain { border-color: transparent; }
-  .proj-card {
-    background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06);
-    border-radius: 14px; padding: 16px 20px; margin-bottom: 10px; transition: background 0.15s;
-  }
+  .proj-card { background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 14px; padding: 16px 20px; margin-bottom: 10px; transition: background 0.15s; }
   .proj-card:hover { background: rgba(255,255,255,0.035); }
   .model-bar-wrap { height: 4px; background: rgba(255,255,255,0.06); border-radius: 2px; overflow: hidden; flex: 1; }
   .model-bar { height: 100%; border-radius: 2px; transition: width 0.5s ease; }
-  .err-badge {
-    display: inline-block; padding: 2px 7px; border-radius: 5px;
-    font-size: 11px; font-family: 'Share Tech Mono', monospace; min-width: 42px; text-align: center;
-  }
+  .err-badge { display: inline-block; padding: 2px 7px; border-radius: 5px; font-size: 11px; font-family: 'Share Tech Mono', monospace; min-width: 42px; text-align: center; }
   .mae-box { border-radius: 10px; padding: 10px 14px; text-align: center; min-width: 80px; transition: all 0.2s; }
 `;
 
@@ -276,7 +231,6 @@ function CardChip({ card, isCaptain, onSetCaptain }) {
   const score = card.l15 ? card.l15.toFixed(1) : "—";
   const proj = card.proj ? card.proj.toFixed(1) : null;
   const rarityColor = { unique: "#f59e0b", super_rare: "#c084fc", rare: "#ef4444", limited: "#f97316", common: "#6b7280" }[card.rarity?.toLowerCase()] || "#6b7280";
-
   return (
     <div className={`card-chip holo-border ${isCaptain ? "captain" : ""}`} onClick={() => onSetCaptain(card.slug)}>
       <div style={{ width: 8, height: 8, borderRadius: "50%", flexShrink: 0, background: rarityColor, boxShadow: `0 0 8px ${rarityColor}` }} />
@@ -322,7 +276,14 @@ function ProjectionsPage() {
   const [error, setError] = useState("");
   const [updateMsg, setUpdateMsg] = useState("");
   const [pendingPredictions, setPendingPredictions] = useState({});
-  const [history, setHistory] = useState({});
+
+  // Historique persisté dans localStorage
+  const [history, setHistory] = useState(() => loadHistory());
+
+  // Sauvegarde automatique à chaque changement d'historique
+  useEffect(() => {
+    saveHistory(history);
+  }, [history]);
 
   const loadPlayers = async (slug) => {
     setLoading(true); setError("");
@@ -332,16 +293,14 @@ function ProjectionsPage() {
       if (!data?.data?.user) throw new Error("Slug introuvable.");
       const raw = (data.data.user.cards?.nodes || [])
         .map(normalizeCard)
-        // Filtre FOOTBALL uniquement
         .filter(p => p.sport === "FOOTBALL" && p.position && p.displayName && p.l15 > 0);
       if (!raw.length) throw new Error("Aucune carte football trouvée.");
 
-      const now = new Date();
-      const gwLabel = `GW ${now.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" })}`;
+      const weekKey = getISOWeekKey();
       const preds = {};
       raw.forEach(p => {
         const m = computeModels(p);
-        if (m) preds[p.slug] = { predictions: m, gwLabel };
+        if (m) preds[p.slug] = { predictions: m, weekKey };
       });
 
       setPlayers(raw);
@@ -365,7 +324,6 @@ function ProjectionsPage() {
       let updated = 0;
 
       nodes.forEach(c => {
-        // Filtre football uniquement
         if (c.sport !== "FOOTBALL") return;
         const pSlug = c.anyPlayer?.slug;
         const scores = c.anyPlayer?.playerGameScores || [];
@@ -374,25 +332,47 @@ function ProjectionsPage() {
         const real = scores[0]?.score;
         if (!real || real <= 0) return;
 
-        const { predictions, gwLabel } = pendingPredictions[pSlug];
+        const { predictions, weekKey } = pendingPredictions[pSlug];
+
+        // Clé unique : joueur + semaine ISO + score → zéro doublon possible
+        const entryKey = `${pSlug}_${weekKey}_${real}`;
+
+        if (!newHistory[pSlug]) newHistory[pSlug] = [];
+
+        // Vérifier doublon
+        const alreadyExists = newHistory[pSlug].some(h => h.entryKey === entryKey);
+        if (alreadyExists) return;
+
         const errors = {};
         MODELS.forEach(m => { errors[m.id] = Math.abs(predictions[m.id] - real); });
 
-        if (!newHistory[pSlug]) newHistory[pSlug] = [];
-        const alreadyExists = newHistory[pSlug].some(h => h.gwLabel === gwLabel && h.real === real);
-        if (!alreadyExists) {
-          newHistory[pSlug].push({ gwLabel, predictions, real, errors });
-          updated++;
-        }
+        newHistory[pSlug].push({
+          entryKey,
+          weekKey,
+          gwLabel: `GW ${weekKey}`,
+          predictions,
+          real,
+          errors,
+        });
+        updated++;
       });
 
       setHistory(newHistory);
-      setUpdateMsg(updated > 0 ? `✓ ${updated} scores mis à jour` : "Aucun nouveau score — les matchs ne sont peut-être pas encore joués.");
+      setUpdateMsg(updated > 0
+        ? `✓ ${updated} score${updated > 1 ? "s" : ""} mis à jour et sauvegardé${updated > 1 ? "s" : ""}`
+        : "Aucun nouveau score — matchs pas encore joués ou déjà archivés."
+      );
     } catch (e) {
       setUpdateMsg(`Erreur : ${e.message}`);
     }
     setUpdating(false);
     setTimeout(() => setUpdateMsg(""), 5000);
+  };
+
+  const clearHistory = () => {
+    if (window.confirm("Effacer tout l'historique des projections ?")) {
+      setHistory({});
+    }
   };
 
   const globalMAE = useMemo(() => {
@@ -401,7 +381,7 @@ function ProjectionsPage() {
     Object.values(history).forEach(gwList => {
       gwList.forEach(gw => {
         MODELS.forEach(m => {
-          if (gw.errors[m.id] !== undefined) { totals[m.id] += gw.errors[m.id]; counts[m.id]++; }
+          if (gw.errors?.[m.id] !== undefined) { totals[m.id] += gw.errors[m.id]; counts[m.id]++; }
         });
       });
     });
@@ -417,27 +397,40 @@ function ProjectionsPage() {
   }, [globalMAE]);
 
   const totalGWs = useMemo(() => {
-    const labels = new Set();
-    Object.values(history).flat().forEach(h => labels.add(h.gwLabel));
-    return labels.size;
+    const keys = new Set();
+    Object.values(history).flat().forEach(h => keys.add(h.weekKey));
+    return keys.size;
   }, [history]);
+
+  const totalEntries = useMemo(() => Object.values(history).flat().length, [history]);
 
   const wrap = { minHeight: "calc(100vh - 57px)", background: "#04060f", padding: "24px", fontFamily: "'Rajdhani', sans-serif" };
 
+  // ── Login ──
   if (!userSlug) return (
     <div style={{ ...wrap, display: "flex", alignItems: "center", justifyContent: "center" }}>
       <div className="holo-border" style={{ background: "rgba(6,10,22,0.95)", borderRadius: 20, padding: "36px 32px", width: "100%", maxWidth: 460 }}>
         <div style={{ fontSize: 11, letterSpacing: 5, color: "rgba(255,255,255,0.25)", fontFamily: "'Share Tech Mono', monospace", marginBottom: 8 }}>◈ SORAKI v1.0</div>
         <h1 className="holo-text" style={{ fontSize: 32, fontWeight: 700, letterSpacing: 2, marginBottom: 8 }}>PROJECTIONS</h1>
         <div style={{ fontSize: 13, color: "rgba(255,255,255,0.3)", fontFamily: "'Share Tech Mono', monospace", marginBottom: 6, lineHeight: 1.7 }}>
-          6 modèles en compétition sur tes vraies cartes football.<br />
-          Scores réels récupérés automatiquement après chaque GW.
+          6 modèles en compétition · Scores récupérés automatiquement<br />
+          Historique sauvegardé localement · Zéro doublon
         </div>
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 24 }}>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 20 }}>
           {MODELS.map(m => (
             <span key={m.id} style={{ fontSize: 10, fontFamily: "'Share Tech Mono', monospace", color: m.color, background: m.color + "15", border: `1px solid ${m.color}30`, borderRadius: 5, padding: "2px 8px" }}>{m.id} {m.label}</span>
           ))}
         </div>
+
+        {/* Résumé historique existant */}
+        {totalEntries > 0 && (
+          <div style={{ background: "rgba(77,232,255,0.05)", border: "1px solid rgba(77,232,255,0.15)", borderRadius: 10, padding: "10px 14px", marginBottom: 20, fontFamily: "'Share Tech Mono', monospace", fontSize: 12 }}>
+            <span style={{ color: "#4de8ff" }}>◈ Historique existant</span>
+            <span style={{ color: "rgba(255,255,255,0.4)", marginLeft: 8 }}>{totalEntries} scores · {totalGWs} GW</span>
+            {bestModel && <span style={{ color: bestModel.color, marginLeft: 8 }}>· Meilleur : {bestModel.id}</span>}
+          </div>
+        )}
+
         {error && <div style={{ background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 10, padding: "12px 16px", color: "#fca5a5", fontSize: 13, marginBottom: 16, fontFamily: "'Share Tech Mono', monospace" }}>{error}</div>}
         <div style={{ fontSize: 11, color: "rgba(255,255,255,0.25)", marginBottom: 8, letterSpacing: 3, fontFamily: "'Share Tech Mono', monospace" }}>SLUG SORARE</div>
         <input className="soraki-input" type="text" style={{ width: "100%", padding: "13px 16px", fontSize: 15, marginBottom: 12 }}
@@ -452,13 +445,14 @@ function ProjectionsPage() {
     </div>
   );
 
+  // ── Main ──
   return (
     <div style={wrap}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>
         <div>
           <h1 className="holo-text" style={{ fontSize: 24, fontWeight: 700, letterSpacing: 2 }}>PROJECTIONS</h1>
           <div style={{ fontSize: 12, color: "rgba(255,255,255,0.25)", fontFamily: "'Share Tech Mono', monospace", marginTop: 4 }}>
-            {players.length} cartes football · {totalGWs} GW archivées · {userSlug}
+            {players.length} cartes · {totalGWs} GW · {totalEntries} scores archivés · {userSlug}
           </div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
@@ -467,13 +461,15 @@ function ProjectionsPage() {
             {updating ? "Mise à jour..." : "↓ Récupérer les scores réels"}
           </button>
           <button className="action-btn gray" onClick={() => { setUserSlug(""); setPlayers([]); setPendingPredictions({}); }}>← Retour</button>
+          {totalEntries > 0 && <button className="action-btn red" onClick={clearHistory}>🗑</button>}
         </div>
       </div>
 
+      {/* MAE globale */}
       {totalGWs > 0 && (
         <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 14, padding: "16px 20px", marginBottom: 20 }}>
           <div style={{ fontSize: 10, letterSpacing: 3, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono', monospace", marginBottom: 12 }}>
-            ERREUR MOYENNE ABSOLUE — {totalGWs} GW
+            ERREUR MOYENNE ABSOLUE — {totalGWs} GW · {totalEntries} données
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             {MODELS.map(m => {
@@ -497,9 +493,10 @@ function ProjectionsPage() {
       )}
 
       <div style={{ fontSize: 11, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono', monospace", marginBottom: 16 }}>
-        ↓ Projections en cours · Après les matchs, clique "Récupérer les scores réels"
+        Semaine {getISOWeekKey()} · Projections en cours · Clique après les matchs pour mettre à jour
       </div>
 
+      {/* Player cards */}
       {players.map(p => {
         const preds = pendingPredictions[p.slug]?.predictions;
         if (!preds) return null;
@@ -530,7 +527,7 @@ function ProjectionsPage() {
               {lastGW && (
                 <div style={{ textAlign: "right", flexShrink: 0 }}>
                   <div style={{ fontSize: 18, fontWeight: 700, color: "#facc15", fontFamily: "'Share Tech Mono', monospace" }}>{lastGW.real}</div>
-                  <div style={{ fontSize: 10, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono', monospace" }}>dernier score</div>
+                  <div style={{ fontSize: 10, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono', monospace" }}>{lastGW.weekKey}</div>
                 </div>
               )}
             </div>
@@ -538,8 +535,8 @@ function ProjectionsPage() {
             <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
               {MODELS.map(m => {
                 const pred = preds[m.id];
-                const lastErr = lastGW?.errors[m.id];
-                const isBestLast = lastGW && MODELS.every(om => (lastGW.errors[om.id] ?? Infinity) >= lastErr);
+                const lastErr = lastGW?.errors?.[m.id];
+                const isBestLast = lastGW && MODELS.every(om => (lastGW.errors?.[om.id] ?? Infinity) >= lastErr);
                 return (
                   <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <span style={{ fontSize: 10, fontFamily: "'Share Tech Mono', monospace", color: m.color, minWidth: 26, fontWeight: 700, textShadow: `0 0 6px ${m.color}` }}>{m.id}</span>
@@ -562,16 +559,16 @@ function ProjectionsPage() {
 
             {playerHistory.length > 0 && (
               <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid rgba(255,255,255,0.05)" }}>
-                <div style={{ fontSize: 9, color: "rgba(255,255,255,0.18)", fontFamily: "'Share Tech Mono', monospace", letterSpacing: 2, marginBottom: 6 }}>HISTORIQUE</div>
+                <div style={{ fontSize: 9, color: "rgba(255,255,255,0.18)", fontFamily: "'Share Tech Mono', monospace", letterSpacing: 2, marginBottom: 6 }}>HISTORIQUE ({playerHistory.length} GW)</div>
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                   {playerHistory.slice(-6).map((h, i) => {
-                    const bestM = MODELS.reduce((a, b) => (h.errors[a.id] ?? Infinity) < (h.errors[b.id] ?? Infinity) ? a : b);
+                    const bestM = MODELS.reduce((a, b) => (h.errors?.[a.id] ?? Infinity) < (h.errors?.[b.id] ?? Infinity) ? a : b);
                     return (
                       <div key={i} style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 8, padding: "4px 10px", fontSize: 11, fontFamily: "'Share Tech Mono', monospace" }}>
-                        <span style={{ color: "rgba(255,255,255,0.3)" }}>{h.gwLabel} </span>
+                        <span style={{ color: "rgba(255,255,255,0.3)" }}>{h.weekKey} </span>
                         <span style={{ color: "#facc15" }}>{h.real}</span>
                         <span style={{ color: "rgba(255,255,255,0.2)" }}> → </span>
-                        <span style={{ color: bestM.color }}>{bestM.id} ±{h.errors[bestM.id]?.toFixed(0)}</span>
+                        <span style={{ color: bestM.color }}>{bestM.id} ±{h.errors?.[bestM.id]?.toFixed(0)}</span>
                       </div>
                     );
                   })}
@@ -644,9 +641,7 @@ function OptimizerPage() {
           onKeyDown={e => e.key === "Enter" && slug.trim() && run(slug, rarityFilter)}
         />
         <div style={{ fontSize: 11, color: "rgba(255,255,255,0.18)", marginTop: 8, fontFamily: "'Share Tech Mono', monospace" }}>→ pseudo visible dans l'URL de ton profil Sorare</div>
-        <button className="main-btn" style={{ marginTop: 20 }} disabled={!slug.trim()} onClick={() => run(slug, rarityFilter)}>
-          Analyser ma galerie →
-        </button>
+        <button className="main-btn" style={{ marginTop: 20 }} disabled={!slug.trim()} onClick={() => run(slug, rarityFilter)}>Analyser ma galerie →</button>
       </div>
     </div>
   );
