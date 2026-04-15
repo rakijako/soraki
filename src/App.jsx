@@ -773,16 +773,195 @@ function OptimizerPage() {
   return null;
 }
 
+// ─── LANDING PAGE ─────────────────────────────────────────────────────────────
+
+const LANDING_CSS = `
+  @keyframes float  { 0%,100%{transform:translateY(0) rotate(-3deg)} 50%{transform:translateY(-12px) rotate(-3deg)} }
+  @keyframes float2 { 0%,100%{transform:translateY(0) rotate(2deg)}  50%{transform:translateY(-18px) rotate(2deg)} }
+  @keyframes float3 { 0%,100%{transform:translateY(0) rotate(-1deg)} 50%{transform:translateY(-8px) rotate(-1deg)} }
+  @keyframes float4 { 0%,100%{transform:translateY(0) rotate(3deg)}  50%{transform:translateY(-14px) rotate(3deg)} }
+  @keyframes float5 { 0%,100%{transform:translateY(0) rotate(-2deg)} 50%{transform:translateY(-10px) rotate(-2deg)} }
+  @keyframes star-twinkle { 0%,100%{opacity:0.3;transform:scale(1)} 50%{opacity:1;transform:scale(1.3)} }
+  .lcard { background: linear-gradient(160deg,#1a1040,#0d0820,#080412); border-radius:16px; overflow:hidden; position:relative; box-shadow:0 20px 60px rgba(0,0,0,0.8),0 0 0 1px rgba(255,255,255,0.08); flex-shrink:0; }
+  .lcard::before { content:''; position:absolute; inset:0; background:linear-gradient(135deg,rgba(255,110,199,0.15),rgba(77,232,255,0.1),rgba(138,127,255,0.15)); z-index:1; }
+  .lcard-sm  { width:120px; height:170px; animation:float  4s ease-in-out infinite; }
+  .lcard-md  { width:145px; height:205px; animation:float2 3.5s ease-in-out infinite; }
+  .lcard-lg  { width:170px; height:240px; animation:float3 4.5s ease-in-out infinite; z-index:3; }
+  .lcard-sm2 { width:130px; height:185px; animation:float4 3.8s ease-in-out infinite; }
+  .lcard-sm3 { width:115px; height:165px; animation:float5 4.2s ease-in-out infinite; }
+  .lcard-grad { position:absolute; bottom:0; left:0; right:0; height:60%; background:linear-gradient(to top,#080412,transparent); z-index:2; }
+  .lcard-info { position:absolute; bottom:0; left:0; right:0; padding:10px; z-index:3; }
+  .lcard-name { font-size:12px; font-weight:700; color:#fff; line-height:1.1; letter-spacing:0.5px; }
+  .lcard-pos  { font-size:9px; font-family:'Share Tech Mono',monospace; color:rgba(255,255,255,0.4); margin-top:2px; }
+  .lcard-score { position:absolute; top:8px; right:8px; z-index:3; font-family:'Share Tech Mono',monospace; font-size:20px; font-weight:700; color:#4de8ff; text-shadow:0 0 12px rgba(77,232,255,0.8); }
+  .lcard-rarity { position:absolute; top:0; left:0; right:0; height:3px; z-index:3; }
+  .lcard-init { font-size:28px; font-weight:700; color:rgba(255,255,255,0.12); font-family:'Rajdhani',sans-serif; letter-spacing:2px; position:absolute; top:50%; left:50%; transform:translate(-50%,-60%); z-index:1; }
+  .lfeat { background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.07); border-radius:20px; padding:24px; transition:all 0.3s; cursor:pointer; }
+  .lfeat:hover { background:rgba(255,255,255,0.05); transform:translateY(-4px); border-color:rgba(77,232,255,0.2); }
+  .lmodel { background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.06); border-radius:12px; padding:14px 10px; text-align:center; }
+  .lstar { position:absolute; width:2px; height:2px; background:#fff; border-radius:50%; animation:star-twinkle linear infinite; }
+  .lbtn-primary { background:linear-gradient(135deg,#ff6ec7,#4de8ff,#8a7fff,#ff9a3c); background-size:300% auto; animation:holo-shift 3s linear infinite; border:none; border-radius:12px; padding:16px 36px; color:#04060f; font-family:'Rajdhani',sans-serif; font-weight:700; font-size:16px; letter-spacing:2px; cursor:pointer; text-transform:uppercase; transition:filter 0.2s; }
+  .lbtn-primary:hover { filter:brightness(1.15); }
+  .lbtn-secondary { background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.15); border-radius:12px; padding:16px 36px; color:rgba(255,255,255,0.6); font-family:'Rajdhani',sans-serif; font-weight:700; font-size:16px; letter-spacing:2px; cursor:pointer; text-transform:uppercase; transition:all 0.2s; }
+  .lbtn-secondary:hover { background:rgba(255,255,255,0.08); color:#fff; }
+`;
+
+function LandingPage({ onEnter }) {
+  const stars = Array.from({ length: 100 }, (_, i) => ({
+    id: i,
+    left: Math.random() * 100,
+    top: Math.random() * 100,
+    size: Math.random() * 2 + 1,
+    duration: Math.random() * 4 + 2,
+    delay: Math.random() * 4,
+  }));
+
+  const cards = [
+    { cls: "lcard-sm",  rarity: "#ef4444",  init: "FM", score: 54, name: "F. MENDY",      pos: "DEF · Real Madrid",  center: false },
+    { cls: "lcard-md",  rarity: "#f97316",  init: "AS", score: 57, name: "A. SCOTT",      pos: "MID · Bournemouth",  center: false },
+    { cls: "lcard-lg",  rarity: "holo",     init: "MG", score: 61, name: "M. GILLESPIE",  pos: "GK · Newcastle",     center: true  },
+    { cls: "lcard-sm2", rarity: "#c084fc",  init: "DU", score: 43, name: "D. UDOGIE",     pos: "DEF · Tottenham",    center: false },
+    { cls: "lcard-sm3", rarity: "#6b7280",  init: "SC", score: 46, name: "S. CHUKWUEZE",  pos: "FWD · Fulham",       center: false },
+  ];
+
+  const models = [
+    { id: "M1", label: "Baseline",     color: "#888780", formula: "score = L15" },
+    { id: "M2", label: "Forme",        color: "#378ADD", formula: "0.6·L5 + 0.4·L15" },
+    { id: "M3", label: "Sorare",       color: "#1D9E75", formula: "projection officielle" },
+    { id: "M4", label: "Localisation", color: "#BA7517", formula: "L15 × dom/ext" },
+    { id: "M5", label: "Composite",    color: null,      formula: "α·L5 + β·L15 + γ·dom" },
+    { id: "M6", label: "Tendance",     color: "#639922", formula: "L15 + λ·(L5−L15)" },
+  ];
+
+  return (
+    <div style={{ background: "#04060f", minHeight: "100vh", fontFamily: "'Rajdhani', sans-serif", overflowX: "hidden", position: "relative" }}>
+      <style>{LANDING_CSS}</style>
+
+      {/* Stars */}
+      <div style={{ position: "fixed", inset: 0, zIndex: 0, overflow: "hidden", pointerEvents: "none" }}>
+        {stars.map(s => (
+          <div key={s.id} className="lstar" style={{ left: s.left + "%", top: s.top + "%", width: s.size + "px", height: s.size + "px", opacity: 0.3, animationDuration: s.duration + "s", animationDelay: s.delay + "s" }} />
+        ))}
+      </div>
+
+      {/* NAV */}
+      <nav style={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 100, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 48px", background: "rgba(4,6,15,0.85)", backdropFilter: "blur(20px)", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+        <span className="holo-text" style={{ fontSize: 18, fontWeight: 700, letterSpacing: 3 }}>◈ SORAKI</span>
+        <div style={{ display: "flex", gap: 32, alignItems: "center" }}>
+          <span style={{ color: "rgba(255,255,255,0.4)", fontFamily: "'Share Tech Mono',monospace", fontSize: 12, letterSpacing: 2, cursor: "pointer" }} onClick={() => document.getElementById('lfeatures')?.scrollIntoView({ behavior: 'smooth' })}>FEATURES</span>
+          <span style={{ color: "rgba(255,255,255,0.4)", fontFamily: "'Share Tech Mono',monospace", fontSize: 12, letterSpacing: 2, cursor: "pointer" }} onClick={() => document.getElementById('lmodels')?.scrollIntoView({ behavior: 'smooth' })}>MODÈLES</span>
+          <button className="lbtn-primary" style={{ padding: "10px 24px", fontSize: 14 }} onClick={onEnter}>Accéder →</button>
+        </div>
+      </nav>
+
+      {/* HERO */}
+      <section style={{ position: "relative", zIndex: 2, minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "120px 48px 60px", textAlign: "center" }}>
+        <div style={{ fontFamily: "'Share Tech Mono',monospace", fontSize: 11, letterSpacing: 4, color: "rgba(255,255,255,0.3)", marginBottom: 16 }}>◈ Sorare Analytics · Gratuit · Sans mot de passe</div>
+        <h1 className="holo-text" style={{ fontSize: "clamp(48px,10vw,100px)", fontWeight: 700, lineHeight: 1, letterSpacing: 3, marginBottom: 16 }}>SORAKI</h1>
+        <p style={{ fontSize: 16, color: "rgba(255,255,255,0.4)", fontFamily: "'Share Tech Mono',monospace", letterSpacing: 1, marginBottom: 8 }}>L'outil d'analyse Sorare SO5 qui apprend à te connaître</p>
+        <p style={{ fontSize: 13, color: "rgba(255,255,255,0.25)", fontFamily: "'Share Tech Mono',monospace", marginBottom: 40 }}>6 modèles prédictifs · Compo optimisée · Scores automatiques · Historique persistant</p>
+
+        <div style={{ display: "flex", gap: 16, justifyContent: "center", flexWrap: "wrap", marginBottom: 80 }}>
+          <button className="lbtn-primary" onClick={onEnter}>SO5 Optimizer →</button>
+          <button className="lbtn-secondary" onClick={onEnter}>Voir les projections</button>
+        </div>
+
+        {/* Cards */}
+        <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "center", gap: 14, width: "100%", maxWidth: 860 }}>
+          {cards.map((c, i) => (
+            <div key={i} className={`lcard ${c.cls} ${c.center ? "holo-border" : ""}`}>
+              <div className="lcard-rarity" style={{ background: c.rarity === "holo" ? "linear-gradient(90deg,#ff6ec7,#4de8ff,#8a7fff,#ff9a3c)" : `linear-gradient(90deg,${c.rarity},${c.rarity}aa)`, backgroundSize: "300% auto", animation: c.rarity === "holo" ? "holo-shift 2s linear infinite" : "none" }} />
+              <div className="lcard-init">{c.init}</div>
+              <div className="lcard-grad" />
+              <div className="lcard-score" style={{ color: c.center ? "#facc15" : "#4de8ff", fontSize: c.center ? "26px" : "20px", textShadow: c.center ? "0 0 16px rgba(250,204,21,0.8)" : "0 0 12px rgba(77,232,255,0.8)" }}>{c.score}</div>
+              <div className="lcard-info">
+                <div className="lcard-name" style={{ fontSize: c.center ? "15px" : "12px" }}>{c.name}</div>
+                <div className="lcard-pos">{c.pos}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* FEATURES */}
+      <section id="lfeatures" style={{ position: "relative", zIndex: 2, padding: "80px 48px", maxWidth: 1100, margin: "0 auto" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 20 }}>
+          {[
+            { icon: "⚡", tag: "Feature 01", title: "SO5 OPTIMIZER", desc: "Génère ta meilleure compo depuis ta galerie.", items: ["Optimisation par score L15", "Bonus Cap + Multi-Club", "DOM / EXT · Prochain match", "Projection officielle Sorare", "Filtre par rareté"], badge: "Gratuit · Sans mot de passe", badgeColor: "#4de8ff", holo: true },
+            { icon: "📊", tag: "Feature 02", title: "PROJECTIONS", desc: "6 modèles en compétition sur tes cartes football.", items: ["Snapshot pré-GW automatique", "Scores réels post-GW", "MAE par modèle · Convergence", "Historique local persistant", "Zéro doublon · Semaine ISO"], badge: "Apprend chaque GW", badgeColor: "#8a7fff", holo: true },
+            { icon: "🗄️", tag: "Feature 03 · Bientôt", title: "DATABASE", desc: "Base complète des 5 grands championnats.", items: ["L5 / L10 / L15 / L40 réels", "D-Score propriétaire", "Filtre compétition / poste", "Surbrillance galerie perso", "Tri par colonne"], badge: "Disponible avec clé API", badgeColor: "rgba(255,255,255,0.3)", holo: false },
+          ].map((f, i) => (
+            <div key={i} className={`lfeat ${f.holo ? "holo-border" : ""}`} onClick={onEnter}>
+              <span style={{ fontSize: 24, marginBottom: 16, display: "block" }}>{f.icon}</span>
+              <div style={{ fontFamily: "'Share Tech Mono',monospace", fontSize: 10, letterSpacing: 3, color: "rgba(255,255,255,0.25)", marginBottom: 8 }}>{f.tag}</div>
+              <div style={{ fontSize: 22, fontWeight: 700, color: "#f1f5f9", letterSpacing: 1, marginBottom: 10 }}>{f.title}</div>
+              <div style={{ fontSize: 13, color: "rgba(255,255,255,0.35)", fontFamily: "'Share Tech Mono',monospace", lineHeight: 1.7, marginBottom: 14 }}>{f.desc}</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                {f.items.map((item, j) => (
+                  <div key={j} style={{ fontSize: 12, fontFamily: "'Share Tech Mono',monospace", color: f.holo ? "rgba(255,255,255,0.3)" : "rgba(255,255,255,0.18)", display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ color: f.holo ? "#4de8ff" : "rgba(255,255,255,0.2)" }}>→</span>{item}
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: "inline-block", fontSize: 10, fontFamily: "'Share Tech Mono',monospace", padding: "2px 8px", borderRadius: 4, marginTop: 16, background: f.badgeColor + "15", color: f.badgeColor, border: `1px solid ${f.badgeColor}33` }}>{f.badge}</div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* MODELS */}
+      <section id="lmodels" style={{ position: "relative", zIndex: 2, padding: "40px 48px 80px", maxWidth: 1100, margin: "0 auto" }}>
+        <div style={{ fontFamily: "'Share Tech Mono',monospace", fontSize: 10, letterSpacing: 4, color: "rgba(255,255,255,0.2)", textTransform: "uppercase", textAlign: "center", marginBottom: 12 }}>Intelligence artificielle</div>
+        <h2 style={{ fontSize: 36, fontWeight: 700, textAlign: "center", color: "#f1f5f9", letterSpacing: 2, marginBottom: 8 }}>6 MODÈLES EN COMPÉTITION</h2>
+        <p style={{ fontSize: 13, color: "rgba(255,255,255,0.3)", fontFamily: "'Share Tech Mono',monospace", textAlign: "center", marginBottom: 40 }}>Chaque semaine, les modèles projettent tes joueurs. Le meilleur converge vers la réalité.</p>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 12 }}>
+          {models.map(m => (
+            <div key={m.id} className={`lmodel ${!m.color ? "holo-border" : ""}`} style={{ borderColor: m.color ? m.color + "33" : undefined }}>
+              {m.color ? (
+                <div style={{ fontSize: 14, fontWeight: 700, fontFamily: "'Share Tech Mono',monospace", color: m.color, marginBottom: 6 }}>{m.id}</div>
+              ) : (
+                <div className="holo-text" style={{ fontSize: 14, fontWeight: 700, fontFamily: "'Share Tech Mono',monospace", marginBottom: 6 }}>{m.id}</div>
+              )}
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", fontFamily: "'Share Tech Mono',monospace", marginBottom: 8 }}>{m.label}</div>
+              <div style={{ fontSize: 10, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono',monospace", lineHeight: 1.5 }}>{m.formula}</div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* CTA */}
+      <section style={{ position: "relative", zIndex: 2, padding: "60px 48px 100px", textAlign: "center" }}>
+        <div className="holo-border" style={{ maxWidth: 600, margin: "0 auto", background: "rgba(255,255,255,0.02)", borderRadius: 24, padding: 48 }}>
+          <h2 className="holo-text" style={{ fontSize: 36, fontWeight: 700, letterSpacing: 2, marginBottom: 12 }}>PRÊT À OPTIMISER ?</h2>
+          <p style={{ fontSize: 13, color: "rgba(255,255,255,0.3)", fontFamily: "'Share Tech Mono',monospace", marginBottom: 32, lineHeight: 1.7 }}>
+            Entre ton slug Sorare et génère ta meilleure compo SO5.<br />Gratuit · Sans mot de passe · Sans inscription.
+          </p>
+          <button className="lbtn-primary" onClick={onEnter}>Accéder à Soraki →</button>
+        </div>
+      </section>
+
+      {/* FOOTER */}
+      <footer style={{ position: "relative", zIndex: 2, borderTop: "1px solid rgba(255,255,255,0.05)", padding: "24px 48px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ fontFamily: "'Share Tech Mono',monospace", fontSize: 11, color: "rgba(255,255,255,0.2)" }}>◈ SORAKI · Outil non officiel · Non affilié à Sorare</div>
+        <div style={{ fontFamily: "'Share Tech Mono',monospace", fontSize: 11, color: "rgba(255,255,255,0.2)" }}>Fait avec ❤ par rakijako</div>
+      </footer>
+    </div>
+  );
+}
+
 // ─── APP ROOT ─────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [page, setPage] = useState("optimizer");
+  const [page, setPage] = useState("landing");
+
+  if (page === "landing") return <LandingPage onEnter={() => setPage("optimizer")} />;
+
   return (
     <div style={{ background: "#04060f", minHeight: "100vh" }}>
       <style>{CSS}</style>
       <div className="scanline-wrap"><div className="scanline" /></div>
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 24px", borderBottom: "1px solid rgba(255,255,255,0.05)", position: "sticky", top: 0, background: "rgba(4,6,15,0.97)", backdropFilter: "blur(20px)", zIndex: 100 }}>
-        <span className="holo-text" style={{ fontSize: 16, fontWeight: 700, letterSpacing: 3, marginRight: 8 }}>◈ SORAKI</span>
+        <span className="holo-text" style={{ fontSize: 16, fontWeight: 700, letterSpacing: 3, marginRight: 8, cursor: "pointer" }} onClick={() => setPage("landing")}>◈ SORAKI</span>
         <button className={`nav-btn ${page === "optimizer" ? "active" : ""}`} onClick={() => setPage("optimizer")}>SO5 OPTIMIZER</button>
         <button className={`nav-btn ${page === "projections" ? "active" : ""}`} onClick={() => setPage("projections")}>PROJECTIONS</button>
       </div>
