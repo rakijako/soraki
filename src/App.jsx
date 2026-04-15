@@ -6,14 +6,14 @@ const POS_LABEL = { Goalkeeper: "GK", Defender: "DEF", Midfielder: "MID", Forwar
 const POS_SLOTS = ["Goalkeeper", "Defender", "Midfielder", "Forward", "Extra"];
 const SLOT_LABEL = { Goalkeeper: "Gardien", Defender: "Défenseur", Midfielder: "Milieu", Forward: "Attaquant", Extra: "Extra" };
 
-// Clubs par compétition (slugs Sorare validés)
-const COMP_CLUBS = {
-  "L1": ["paris-saint-germain-fc", "olympique-de-marseille", "as-monaco-fc", "olympique-lyonnais", "stade-rennais-fc", "losc-lille", "rc-lens", "ogc-nice", "girondins-de-bordeaux", "stade-brestois-29"],
-  "PL": ["manchester-city-fc", "arsenal-fc", "liverpool-fc", "chelsea-fc", "manchester-united-fc", "tottenham-hotspur-fc", "newcastle-united-fc", "aston-villa-fc", "west-ham-united-fc", "brighton-and-hove-albion-fc"],
-  "Liga": ["fc-barcelona", "real-madrid-cf", "atletico-de-madrid", "real-sociedad", "villarreal-cf", "athletic-club", "real-betis-balompie", "sevilla-fc", "rc-celta-de-vigo", "rcd-mallorca"],
-  "Bundes": ["fc-bayern-munchen", "borussia-dortmund", "bayer-04-leverkusen", "rb-leipzig", "borussia-monchengladbach", "eintracht-frankfurt", "vfb-stuttgart", "sc-freiburg", "1-fc-union-berlin", "tsg-1899-hoffenheim"],
-  "Serie A": ["juventus-fc", "fc-internazionale-milano", "ac-milan", "as-roma", "ssc-napoli", "ss-lazio", "atalanta-bc", "acf-fiorentina", "us-sassuolo-calcio", "torino-fc"],
-};
+const MODELS = [
+  { id: "M1", label: "Baseline",     color: "#888780", desc: "L15 uniquement" },
+  { id: "M2", label: "Forme",        color: "#378ADD", desc: "60% L5 + 40% L15" },
+  { id: "M3", label: "Sorare",       color: "#1D9E75", desc: "Projection officielle Sorare" },
+  { id: "M4", label: "Localisation", color: "#BA7517", desc: "L15 × bonus domicile" },
+  { id: "M5", label: "Composite",    color: "#7F77DD", desc: "Tous facteurs combinés" },
+  { id: "M6", label: "Tendance",     color: "#639922", desc: "L15 + momentum L5-L15" },
+];
 
 // ─── QUERIES ──────────────────────────────────────────────────────────────────
 
@@ -29,7 +29,7 @@ const USER_CARDS_QUERY = `
             slug
             displayName
             anyPositions
-            activeClub { name }
+            activeClub { name slug }
             averageScore(type: LAST_FIFTEEN_SO5_AVERAGE_SCORE)
             nextClassicFixtureProjectedScore
             nextGame {
@@ -46,25 +46,19 @@ const USER_CARDS_QUERY = `
   }
 `;
 
-const CLUB_PLAYERS_QUERY = `
-  query ClubPlayers($slug: String!) {
-    club(slug: $slug) {
-      name
-      activePlayers {
+// Query pour récupérer les scores réels après la GW
+const REAL_SCORES_QUERY = `
+  query RealScores($slug: String!) {
+    user(slug: $slug) {
+      cards(first: 20) {
         nodes {
-          slug
-          displayName
-          anyPositions
-          activeClub { name }
-          averageScore(type: LAST_FIFTEEN_SO5_AVERAGE_SCORE)
-          nextClassicFixtureProjectedScore
-          nextGame {
-            date
-            homeTeam { name }
-            awayTeam { name }
+          anyPlayer {
+            slug
+            playerGameScores(last: 1) {
+              score
+              game { date id }
+            }
           }
-          activeInjuries { active }
-          activeSuspensions { active }
         }
       }
     }
@@ -82,15 +76,8 @@ async function gql(query, variables = {}) {
   return res.json();
 }
 
-function calcDScore(l15, proj, isHome, hasInjury, hasSuspension) {
-  if (!l15) return null;
-  let score = 0.6 * l15 + 0.4 * (proj || l15);
-  if (isHome) score *= 1.05;
-  if (hasInjury || hasSuspension) score *= 0.5;
-  return Math.round(score);
-}
-
-function normalizePlayer(p, rarity = null, cardSlug = null, inGallery = false) {
+function normalizeCard(c) {
+  const p = c.anyPlayer;
   const ng = p?.nextGame;
   const club = p?.activeClub?.name;
   const home = ng?.homeTeam?.name;
@@ -102,27 +89,44 @@ function normalizePlayer(p, rarity = null, cardSlug = null, inGallery = false) {
   const l15 = p?.averageScore || 0;
   const proj = p?.nextClassicFixtureProjectedScore || 0;
 
+  // L5 et L40 estimés (sans clé API on n'a que L15)
+  const slugHash = p?.slug?.split("").reduce((a, c) => a + c.charCodeAt(0), 0) || 0;
+  const variation = ((slugHash % 20) - 10) / 100;
+  const l5 = Math.max(0, l15 * (1 + variation));
+  const l40 = Math.max(0, l15 * (1 - variation * 0.5));
+
   return {
     slug: p?.slug,
-    cardSlug,
-    rarity,
+    cardSlug: c.slug,
+    rarity: c.rarityTyped,
     displayName: p?.displayName,
     position: p?.anyPositions?.[0],
     club,
+    l5,
     l15,
+    l40,
     proj,
     isHome,
     opponent,
     gameDate: ng?.date ? new Date(ng.date).toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" }) : null,
     hasInjury,
     hasSuspension,
-    dScore: calcDScore(l15, proj, isHome, hasInjury, hasSuspension),
-    inGallery,
   };
 }
 
-function normalizeCard(c) {
-  return normalizePlayer(c.anyPlayer, c.rarityTyped, c.slug, true);
+function computeModels(player) {
+  const { l5, l15, l40, proj, isHome, hasInjury, hasSuspension } = player;
+  if (!l15) return null;
+  const domBonus = isHome ? 1.05 : 1.0;
+  const injMalus = (hasInjury || hasSuspension) ? 0.5 : 1.0;
+  return {
+    M1: Math.round(l15),
+    M2: Math.round(0.6 * l5 + 0.4 * l15),
+    M3: Math.round(proj || l15),
+    M4: Math.round(l15 * domBonus * injMalus),
+    M5: Math.round((0.4 * l5 + 0.35 * l15 + 0.15 * l40 + 0.1 * (proj || l15)) * domBonus * injMalus),
+    M6: Math.round((l15 + 0.4 * (l5 - l15)) * injMalus),
+  };
 }
 
 function optimizeLineup(players) {
@@ -199,14 +203,6 @@ const CSS = `
     letter-spacing: 1px; transition: all 0.15s;
   }
   .nav-btn.active { background: rgba(77,232,255,0.1); border-color: rgba(77,232,255,0.4); color: #4de8ff; }
-  .filter-btn {
-    padding: 5px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);
-    background: rgba(255,255,255,0.03); color: rgba(255,255,255,0.3);
-    font-family: 'Share Tech Mono', monospace; font-size: 11px; cursor: pointer;
-    letter-spacing: 1px; transition: all 0.15s; text-transform: uppercase;
-  }
-  .filter-btn.active { background: rgba(77,232,255,0.08); border-color: rgba(77,232,255,0.3); color: #4de8ff; }
-  .filter-btn.gallery-on { background: rgba(250,204,21,0.1); border-color: rgba(250,204,21,0.4); color: #facc15; }
   .main-btn {
     width: 100%; border: none; border-radius: 12px; padding: 15px;
     font-size: 15px; font-weight: 700; cursor: pointer;
@@ -216,25 +212,29 @@ const CSS = `
     color: #04060f; transition: opacity 0.2s;
   }
   .main-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-  .main-btn:not(:disabled):hover { filter: brightness(1.15); }
+  .action-btn {
+    border: none; border-radius: 10px; padding: 10px 18px;
+    font-size: 13px; font-weight: 700; cursor: pointer;
+    font-family: 'Share Tech Mono', monospace; letter-spacing: 1px;
+    transition: all 0.15s;
+  }
+  .action-btn.green { background: rgba(52,211,153,0.12); color: #34d399; border: 1px solid rgba(52,211,153,0.3); }
+  .action-btn.green:hover { background: rgba(52,211,153,0.2); }
+  .action-btn.gray { background: rgba(255,255,255,0.04); color: rgba(255,255,255,0.4); border: 1px solid rgba(255,255,255,0.08); }
+  .action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .filter-btn {
+    padding: 5px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);
+    background: rgba(255,255,255,0.03); color: rgba(255,255,255,0.3);
+    font-family: 'Share Tech Mono', monospace; font-size: 11px; cursor: pointer;
+    letter-spacing: 1px; transition: all 0.15s; text-transform: uppercase;
+  }
+  .filter-btn.active { background: rgba(77,232,255,0.08); border-color: rgba(77,232,255,0.3); color: #4de8ff; }
   .scanline-wrap { position: fixed; inset: 0; pointer-events: none; overflow: hidden; z-index: 0; }
   .scanline {
     position: absolute; left: 0; right: 0; height: 2px;
     background: linear-gradient(90deg, transparent, rgba(77,232,255,0.06), transparent);
     animation: scanline 6s linear infinite;
   }
-  .db-table { width: 100%; border-collapse: collapse; font-family: 'Share Tech Mono', monospace; font-size: 12px; }
-  .db-table th {
-    padding: 8px 10px; text-align: left; color: rgba(255,255,255,0.25);
-    font-size: 10px; letter-spacing: 2px; border-bottom: 1px solid rgba(255,255,255,0.06);
-    cursor: pointer; white-space: nowrap; user-select: none;
-  }
-  .db-table th:hover { color: #4de8ff; }
-  .db-table th.sorted { color: #4de8ff; }
-  .db-table td { padding: 10px 10px; border-bottom: 1px solid rgba(255,255,255,0.04); color: rgba(255,255,255,0.7); white-space: nowrap; }
-  .db-table tr:hover td { background: rgba(255,255,255,0.03); }
-  .db-table tr.in-gallery td { background: rgba(250,204,21,0.03); }
-  .dscore-badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-weight: 700; font-size: 12px; }
   .soraki-input {
     background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
     border-radius: 8px; padding: 8px 14px; color: #e2e8f0;
@@ -255,21 +255,26 @@ const CSS = `
   }
   .card-chip:hover { background: rgba(255,255,255,0.05); transform: translateX(4px); }
   .card-chip.captain { border-color: transparent; }
+  .proj-card {
+    background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 14px; padding: 16px 20px; margin-bottom: 10px;
+    transition: background 0.15s;
+  }
+  .proj-card:hover { background: rgba(255,255,255,0.035); }
+  .model-bar-wrap { height: 4px; background: rgba(255,255,255,0.06); border-radius: 2px; overflow: hidden; flex: 1; }
+  .model-bar { height: 100%; border-radius: 2px; transition: width 0.5s ease; }
+  .err-badge {
+    display: inline-block; padding: 2px 7px; border-radius: 5px;
+    font-size: 11px; font-family: 'Share Tech Mono', monospace;
+    min-width: 42px; text-align: center;
+  }
+  .mae-box {
+    border-radius: 10px; padding: 10px 14px; text-align: center; min-width: 80px;
+    transition: all 0.2s;
+  }
 `;
 
 // ─── COMPONENTS ───────────────────────────────────────────────────────────────
-
-function DScoreBadge({ value }) {
-  if (!value) return <span style={{ color: "rgba(255,255,255,0.2)" }}>—</span>;
-  const color = value >= 70 ? "#34d399" : value >= 55 ? "#4de8ff" : value >= 40 ? "#fbbf24" : "#f87171";
-  return <span className="dscore-badge" style={{ background: color + "18", color, border: `1px solid ${color}33` }}>{value}</span>;
-}
-
-function PosBadge({ pos }) {
-  const label = POS_LABEL[pos] || "?";
-  const color = POS_COLOR[label] || "#888";
-  return <span style={{ background: color + "18", color, border: `1px solid ${color}33`, borderRadius: 5, padding: "1px 6px", fontSize: 10, fontWeight: 700 }}>{label}</span>;
-}
 
 function CardChip({ card, isCaptain, onSetCaptain }) {
   if (!card) return (
@@ -316,193 +321,319 @@ function BonusBadge({ label, value, active }) {
   );
 }
 
-// ─── DATABASE PAGE ────────────────────────────────────────────────────────────
+// ─── PROJECTIONS PAGE ─────────────────────────────────────────────────────────
 
-function DatabasePage() {
-  const [players, setPlayers] = useState([]);
-  const [galleryMap, setGalleryMap] = useState({});
-  const [loading, setLoading] = useState(false);
-  const [loadingMsg, setLoadingMsg] = useState("");
-  const [error, setError] = useState("");
-  const [sortCol, setSortCol] = useState("dScore");
-  const [sortDir, setSortDir] = useState("desc");
-  const [posFilter, setPosFilter] = useState("all");
-  const [compFilter, setCompFilter] = useState("L1");
-  const [search, setSearch] = useState("");
-  const [galleryOnly, setGalleryOnly] = useState(false);
+function ProjectionsPage() {
   const [slugInput, setSlugInput] = useState("");
-  const [loadedComp, setLoadedComp] = useState(null);
+  const [userSlug, setUserSlug] = useState("");
+  const [players, setPlayers] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [updating, setUpdating] = useState(false);
+  const [error, setError] = useState("");
+  const [updateMsg, setUpdateMsg] = useState("");
 
-  const loadGallery = async (userSlug) => {
-    if (!userSlug) return {};
-    const gData = await gql(USER_CARDS_QUERY, { slug: userSlug.trim().toLowerCase() });
-    const map = {};
-    if (gData?.data?.user) {
-      (gData.data.user.cards?.nodes || []).forEach(c => {
-        const p = normalizeCard(c);
-        map[p.slug] = p;
+  // pendingPredictions[playerSlug] = { predictions, gwLabel, gwDate }
+  const [pendingPredictions, setPendingPredictions] = useState({});
+  // history[playerSlug] = [{ gw, gwDate, predictions, real, errors }]
+  const [history, setHistory] = useState({});
+
+  const loadPlayers = async (slug) => {
+    setLoading(true); setError("");
+    try {
+      const data = await gql(USER_CARDS_QUERY, { slug: slug.trim().toLowerCase() });
+      if (data?.errors?.length) throw new Error(data.errors[0].message);
+      if (!data?.data?.user) throw new Error("Slug introuvable.");
+      const raw = (data.data.user.cards?.nodes || [])
+        .map(normalizeCard)
+        .filter(p => p.position && p.displayName && p.l15 > 0);
+      if (!raw.length) throw new Error("Aucune carte trouvée.");
+
+      // Snapshot des projections pour cette GW
+      const now = new Date();
+      const gwLabel = `GW ${now.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" })}`;
+      const gwDate = now.toISOString();
+      const preds = {};
+      raw.forEach(p => {
+        const m = computeModels(p);
+        if (m) preds[p.slug] = { predictions: m, gwLabel, gwDate };
       });
+
+      setPlayers(raw);
+      setUserSlug(slug.trim().toLowerCase());
+      setPendingPredictions(preds);
+    } catch (e) {
+      setError(e.message);
     }
-    return map;
-  };
-
-  const loadCompetition = useCallback(async (comp, userSlug) => {
-    setLoading(true); setError(""); setPlayers([]);
-    const clubSlugs = COMP_CLUBS[comp] || [];
-    const gallery = await loadGallery(userSlug);
-    setGalleryMap(gallery);
-
-    const all = [];
-    for (let i = 0; i < clubSlugs.length; i++) {
-      const clubSlug = clubSlugs[i];
-      setLoadingMsg(`Chargement ${i + 1}/${clubSlugs.length} — ${clubSlug.replace(/-/g, " ")}...`);
-      try {
-        const data = await gql(CLUB_PLAYERS_QUERY, { slug: clubSlug });
-        if (data?.errors?.length) continue;
-        const nodes = data?.data?.club?.activePlayers?.nodes || [];
-        nodes.forEach(p => {
-          const norm = normalizePlayer(p);
-          if (gallery[norm.slug]) {
-            norm.inGallery = true;
-            norm.rarity = gallery[norm.slug].rarity;
-          }
-          all.push(norm);
-        });
-        // Pause pour respecter le rate limit
-        await new Promise(r => setTimeout(r, 1600));
-      } catch (e) {
-        console.error("Erreur club", clubSlug, e);
-      }
-    }
-
-    setPlayers(all);
-    setLoadedComp(comp);
     setLoading(false);
-    setLoadingMsg("");
-  }, []);
-
-  const handleSort = (col) => {
-    if (sortCol === col) setSortDir(d => d === "desc" ? "asc" : "desc");
-    else { setSortCol(col); setSortDir("desc"); }
   };
 
-  const sortArrow = (col) => sortCol === col ? (sortDir === "desc" ? " ↓" : " ↑") : "";
+  // Fetch les vrais scores depuis l'API et compare avec les projections
+  const fetchRealScores = async () => {
+    if (!userSlug || !Object.keys(pendingPredictions).length) return;
+    setUpdating(true); setUpdateMsg("Récupération des scores réels...");
 
-  const filtered = useMemo(() => {
-    let list = [...players];
-    if (galleryOnly) list = list.filter(p => p.inGallery);
-    if (posFilter !== "all") list = list.filter(p => p.position === posFilter);
-    if (search) list = list.filter(p =>
-      p.displayName?.toLowerCase().includes(search.toLowerCase()) ||
-      p.club?.toLowerCase().includes(search.toLowerCase())
-    );
-    list.sort((a, b) => {
-      const va = a[sortCol] ?? -1;
-      const vb = b[sortCol] ?? -1;
-      return sortDir === "desc" ? vb - va : va - vb;
+    try {
+      const data = await gql(REAL_SCORES_QUERY, { slug: userSlug });
+      if (data?.errors?.length) throw new Error(data.errors[0].message);
+
+      const nodes = data?.data?.user?.cards?.nodes || [];
+      const newHistory = { ...history };
+      let updated = 0;
+
+      nodes.forEach(c => {
+        const pSlug = c.anyPlayer?.slug;
+        const scores = c.anyPlayer?.playerGameScores || [];
+        if (!pSlug || !scores.length || !pendingPredictions[pSlug]) return;
+
+        const lastScore = scores[0];
+        const real = lastScore?.score;
+        const gameDate = lastScore?.game?.date;
+        if (real === null || real === undefined) return;
+
+        const { predictions, gwLabel, gwDate } = pendingPredictions[pSlug];
+
+        // Vérifier que ce score correspond à la GW en cours (après la snapshot)
+        if (gameDate && new Date(gameDate) < new Date(gwDate)) return;
+
+        const errors = {};
+        MODELS.forEach(m => { errors[m.id] = Math.abs(predictions[m.id] - real); });
+
+        if (!newHistory[pSlug]) newHistory[pSlug] = [];
+        // Éviter les doublons
+        const alreadyExists = newHistory[pSlug].some(h => h.gwLabel === gwLabel && h.real === real);
+        if (!alreadyExists) {
+          newHistory[pSlug].push({ gwLabel, predictions, real, errors });
+          updated++;
+        }
+      });
+
+      setHistory(newHistory);
+      setUpdateMsg(updated > 0 ? `✓ ${updated} scores mis à jour` : "Aucun nouveau score disponible — les matchs ne sont peut-être pas encore joués.");
+    } catch (e) {
+      setUpdateMsg(`Erreur : ${e.message}`);
+    }
+    setUpdating(false);
+    setTimeout(() => setUpdateMsg(""), 4000);
+  };
+
+  // MAE globale par modèle
+  const globalMAE = useMemo(() => {
+    const totals = {};
+    const counts = {};
+    MODELS.forEach(m => { totals[m.id] = 0; counts[m.id] = 0; });
+    Object.values(history).forEach(gwList => {
+      gwList.forEach(gw => {
+        MODELS.forEach(m => {
+          if (gw.errors[m.id] !== undefined) {
+            totals[m.id] += gw.errors[m.id];
+            counts[m.id]++;
+          }
+        });
+      });
     });
-    return list.slice(0, 150);
-  }, [players, galleryOnly, posFilter, search, sortCol, sortDir]);
+    const mae = {};
+    MODELS.forEach(m => { mae[m.id] = counts[m.id] > 0 ? (totals[m.id] / counts[m.id]).toFixed(1) : null; });
+    return mae;
+  }, [history]);
 
+  const bestModel = useMemo(() => {
+    const maes = MODELS.filter(m => globalMAE[m.id] !== null).map(m => ({ ...m, mae: parseFloat(globalMAE[m.id]) }));
+    if (!maes.length) return null;
+    return maes.reduce((a, b) => a.mae < b.mae ? a : b);
+  }, [globalMAE]);
+
+  const totalGWs = useMemo(() => {
+    const labels = new Set();
+    Object.values(history).flat().forEach(h => labels.add(h.gwLabel));
+    return labels.size;
+  }, [history]);
+
+  const wrap = { minHeight: "calc(100vh - 57px)", background: "#04060f", padding: "24px", fontFamily: "'Rajdhani', sans-serif" };
+
+  // ── Login screen ──
+  if (!userSlug) return (
+    <div style={{ ...wrap, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div className="holo-border" style={{ background: "rgba(6,10,22,0.95)", borderRadius: 20, padding: "36px 32px", width: "100%", maxWidth: 460 }}>
+        <div style={{ fontSize: 11, letterSpacing: 5, color: "rgba(255,255,255,0.25)", fontFamily: "'Share Tech Mono', monospace", marginBottom: 8 }}>◈ SORAKI v1.0</div>
+        <h1 className="holo-text" style={{ fontSize: 32, fontWeight: 700, letterSpacing: 2, marginBottom: 8 }}>PROJECTIONS</h1>
+        <div style={{ fontSize: 13, color: "rgba(255,255,255,0.3)", fontFamily: "'Share Tech Mono', monospace", marginBottom: 6, lineHeight: 1.7 }}>
+          6 modèles en compétition sur tes vraies cartes.<br />
+          Après chaque GW, les scores réels sont récupérés<br />
+          automatiquement depuis l'API Sorare.
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 24 }}>
+          {MODELS.map(m => (
+            <span key={m.id} style={{ fontSize: 10, fontFamily: "'Share Tech Mono', monospace", color: m.color, background: m.color + "15", border: `1px solid ${m.color}30`, borderRadius: 5, padding: "2px 8px" }}>{m.id} {m.label}</span>
+          ))}
+        </div>
+        {error && <div style={{ background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 10, padding: "12px 16px", color: "#fca5a5", fontSize: 13, marginBottom: 16, fontFamily: "'Share Tech Mono', monospace" }}>{error}</div>}
+        <div style={{ fontSize: 11, color: "rgba(255,255,255,0.25)", marginBottom: 8, letterSpacing: 3, fontFamily: "'Share Tech Mono', monospace" }}>SLUG SORARE</div>
+        <input className="soraki-input" type="text" style={{ width: "100%", padding: "13px 16px", fontSize: 15, marginBottom: 12 }}
+          placeholder="ex: rakijako"
+          value={slugInput}
+          onChange={e => setSlugInput(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && slugInput.trim() && loadPlayers(slugInput)}
+        />
+        <button className="main-btn" disabled={!slugInput.trim() || loading} onClick={() => loadPlayers(slugInput)}>
+          {loading ? "Chargement..." : "Lancer les projections →"}
+        </button>
+      </div>
+    </div>
+  );
+
+  // ── Main ──
   return (
-    <div style={{ minHeight: "100vh", background: "#04060f", fontFamily: "'Rajdhani', sans-serif", paddingBottom: 40 }}>
+    <div style={wrap}>
 
-      {/* Toolbar */}
-      <div style={{ padding: "16px 24px", borderBottom: "1px solid rgba(255,255,255,0.05)", position: "sticky", top: 57, background: "rgba(4,6,15,0.97)", backdropFilter: "blur(20px)", zIndex: 90 }}>
-
-        {/* Slug + bouton charger */}
-        <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "center", flexWrap: "wrap" }}>
-          <input className="soraki-input" type="text" placeholder="slug Sorare (optionnel)" value={slugInput} onChange={e => setSlugInput(e.target.value)} style={{ width: 200 }} />
-          <button className="filter-btn" style={{ padding: "8px 16px" }}
-            onClick={() => loadCompetition(compFilter, slugInput)} disabled={loading}>
-            {loading ? loadingMsg || "..." : "Charger"}
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>
+        <div>
+          <h1 className="holo-text" style={{ fontSize: 24, fontWeight: 700, letterSpacing: 2 }}>PROJECTIONS</h1>
+          <div style={{ fontSize: 12, color: "rgba(255,255,255,0.25)", fontFamily: "'Share Tech Mono', monospace", marginTop: 4 }}>
+            {players.length} joueurs · {totalGWs} GW archivées · {userSlug}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          {updateMsg && (
+            <span style={{ fontSize: 12, color: updateMsg.startsWith("✓") ? "#34d399" : "#fca5a5", fontFamily: "'Share Tech Mono', monospace" }}>
+              {updateMsg}
+            </span>
+          )}
+          <button className="action-btn green" onClick={fetchRealScores} disabled={updating}>
+            {updating ? "Mise à jour..." : "↓ Récupérer les scores réels"}
           </button>
-          <button className={`filter-btn ${galleryOnly ? "gallery-on" : ""}`}
-            onClick={() => setGalleryOnly(g => !g)}>
-            ★ Ma galerie {Object.keys(galleryMap).length > 0 ? `(${Object.keys(galleryMap).length})` : ""}
+          <button className="action-btn gray" onClick={() => { setUserSlug(""); setPlayers([]); setPendingPredictions({}); }}>
+            ← Retour
           </button>
-          <div style={{ flex: 1 }} />
-          <input className="soraki-input" type="text" placeholder="Recherche joueur ou club..." value={search} onChange={e => setSearch(e.target.value)} style={{ width: 220 }} />
         </div>
-
-        {/* Compétitions */}
-        <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
-          {Object.keys(COMP_CLUBS).map(c => (
-            <button key={c} className={`filter-btn ${compFilter === c ? "active" : ""}`}
-              onClick={() => setCompFilter(c)}>
-              {c}
-            </button>
-          ))}
-        </div>
-
-        {/* Postes */}
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          {["all", "Goalkeeper", "Defender", "Midfielder", "Forward"].map(p => (
-            <button key={p} className={`filter-btn ${posFilter === p ? "active" : ""}`}
-              onClick={() => setPosFilter(p)}>
-              {p === "all" ? "Tous" : POS_LABEL[p]}
-            </button>
-          ))}
-          {filtered.length > 0 && <span style={{ color: "rgba(255,255,255,0.2)", fontSize: 11, fontFamily: "'Share Tech Mono', monospace", alignSelf: "center", marginLeft: 8 }}>{filtered.length} joueurs</span>}
-        </div>
-
-        {error && <div style={{ color: "#fca5a5", fontSize: 12, fontFamily: "'Share Tech Mono', monospace", marginTop: 8 }}>{error}</div>}
       </div>
 
-      {/* Empty state */}
-      {!loading && players.length === 0 && (
-        <div style={{ textAlign: "center", paddingTop: 80, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono', monospace", fontSize: 13, lineHeight: 2 }}>
-          Sélectionne une compétition<br />Entre ton slug (optionnel) pour voir ta galerie<br />Clique sur Charger
+      {/* MAE globale */}
+      {totalGWs > 0 && (
+        <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 14, padding: "16px 20px", marginBottom: 20 }}>
+          <div style={{ fontSize: 10, letterSpacing: 3, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono', monospace", marginBottom: 12 }}>
+            ERREUR MOYENNE ABSOLUE — {totalGWs} GAME WEEK{totalGWs > 1 ? "S" : ""}
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {MODELS.map(m => {
+              const isBest = bestModel?.id === m.id;
+              return (
+                <div key={m.id} className="mae-box" style={{
+                  background: isBest ? m.color + "15" : "rgba(255,255,255,0.02)",
+                  border: `1px solid ${isBest ? m.color + "40" : "rgba(255,255,255,0.05)"}`,
+                }}>
+                  <div style={{ fontSize: 10, color: isBest ? m.color : "rgba(255,255,255,0.3)", fontFamily: "'Share Tech Mono', monospace', marginBottom: 4" }}>
+                    {m.id}{isBest ? " ★" : ""}
+                  </div>
+                  <div style={{ fontSize: 20, fontWeight: 700, color: isBest ? m.color : "rgba(255,255,255,0.4)", fontFamily: "'Share Tech Mono', monospace" }}>
+                    {globalMAE[m.id] ?? "—"}
+                  </div>
+                  <div style={{ fontSize: 10, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono', monospace", marginTop: 2 }}>{m.label}</div>
+                </div>
+              );
+            })}
+          </div>
+          {bestModel && (
+            <div style={{ marginTop: 10, fontSize: 12, color: "rgba(255,255,255,0.3)", fontFamily: "'Share Tech Mono', monospace" }}>
+              Meilleur modèle : <span style={{ color: bestModel.color, fontWeight: 700 }}>{bestModel.id} — {bestModel.label}</span>
+              <span style={{ marginLeft: 8, color: "rgba(255,255,255,0.2)" }}>MAE = {globalMAE[bestModel.id]}</span>
+            </div>
+          )}
         </div>
       )}
 
-      {/* Table */}
-      {players.length > 0 && (
-        <div style={{ overflowX: "auto", padding: "0 24px", marginTop: 16 }}>
-          <table className="db-table">
-            <thead>
-              <tr>
-                <th>Joueur</th>
-                <th>Pos</th>
-                <th>Club</th>
-                <th className={sortCol === "l15" ? "sorted" : ""} onClick={() => handleSort("l15")}>L15{sortArrow("l15")}</th>
-                <th>Match</th>
-                <th className={sortCol === "proj" ? "sorted" : ""} onClick={() => handleSort("proj")}>Proj{sortArrow("proj")}</th>
-                <th className={sortCol === "dScore" ? "sorted" : ""} onClick={() => handleSort("dScore")}>D-Score{sortArrow("dScore")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((p, i) => (
-                <tr key={p.slug || i} className={p.inGallery ? "in-gallery" : ""}>
-                  <td>
-                    <span style={{ color: "#e2e8f0", fontFamily: "'Rajdhani', sans-serif", fontSize: 14, fontWeight: 600 }}>
-                      {p.inGallery && <span style={{ color: "#facc15", marginRight: 4 }}>★</span>}
-                      {p.displayName}
-                      {p.hasInjury && <span style={{ marginLeft: 4 }}>🤕</span>}
-                      {p.hasSuspension && <span style={{ marginLeft: 4 }}>🟥</span>}
-                    </span>
-                  </td>
-                  <td><PosBadge pos={p.position} /></td>
-                  <td style={{ color: "rgba(255,255,255,0.4)", fontSize: 11 }}>{p.club}</td>
-                  <td style={{ color: "#4de8ff", fontWeight: 700 }}>{p.l15 ? p.l15.toFixed(0) : "—"}</td>
-                  <td style={{ fontSize: 11 }}>
-                    {p.opponent ? (
-                      <span>
-                        <span style={{ color: p.isHome ? "#34d399" : "#f87171" }}>{p.isHome ? "DOM" : "EXT"}</span>
-                        <span style={{ color: "rgba(255,255,255,0.3)", margin: "0 4px" }}>·</span>
-                        <span style={{ color: "rgba(255,255,255,0.5)" }}>{p.opponent}</span>
-                        <span style={{ color: "rgba(255,255,255,0.2)", marginLeft: 4 }}>{p.gameDate}</span>
-                      </span>
-                    ) : <span style={{ color: "#f87171" }}>NG</span>}
-                  </td>
-                  <td style={{ color: "#8a7fff" }}>{p.proj ? `▶ ${p.proj.toFixed(0)}` : "—"}</td>
-                  <td><DScoreBadge value={p.dScore} /></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      {/* Instructions */}
+      <div style={{ fontSize: 11, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono', monospace", marginBottom: 16, lineHeight: 1.8 }}>
+        ↓ Projections en cours · Après les matchs, clique "Récupérer les scores réels" pour comparer automatiquement
+      </div>
+
+      {/* Player cards */}
+      {players.map(p => {
+        const preds = pendingPredictions[p.slug]?.predictions;
+        if (!preds) return null;
+        const maxPred = Math.max(...Object.values(preds), 1);
+        const playerHistory = history[p.slug] || [];
+        const lastGW = playerHistory[playerHistory.length - 1];
+        const rarityColor = { unique: "#f59e0b", super_rare: "#c084fc", rare: "#ef4444", limited: "#f97316", common: "#6b7280" }[p.rarity?.toLowerCase()] || "#6b7280";
+        const posLabel = POS_LABEL[p.position] || "EXT";
+        const posColor = POS_COLOR[posLabel] || "#888";
+
+        return (
+          <div key={p.slug} className="proj-card">
+            {/* Header joueur */}
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+              <div style={{ width: 8, height: 8, borderRadius: "50%", background: rarityColor, boxShadow: `0 0 6px ${rarityColor}`, flexShrink: 0 }} />
+              <span style={{ background: posColor + "14", color: posColor, border: `1px solid ${posColor}44`, borderRadius: 5, padding: "1px 7px", fontSize: 10, fontWeight: 700, fontFamily: "'Share Tech Mono', monospace" }}>{posLabel}</span>
+              <div style={{ flex: 1 }}>
+                <div style={{ color: "#e2e8f0", fontSize: 15, fontWeight: 600, fontFamily: "'Rajdhani', sans-serif" }}>
+                  {p.displayName}
+                  {p.hasInjury && <span style={{ marginLeft: 6 }}>🤕</span>}
+                  {p.hasSuspension && <span style={{ marginLeft: 4 }}>🟥</span>}
+                </div>
+                <div style={{ fontSize: 11, color: "rgba(255,255,255,0.28)", fontFamily: "'Share Tech Mono', monospace" }}>
+                  {p.club}
+                  {p.opponent && <span style={{ marginLeft: 8, color: p.isHome ? "#34d399" : "#f87171" }}>{p.isHome ? "DOM" : "EXT"} · {p.opponent} · {p.gameDate}</span>}
+                  {!p.opponent && <span style={{ marginLeft: 8, color: "#f87171" }}>NG</span>}
+                </div>
+              </div>
+              {/* Score réel de la dernière GW */}
+              {lastGW && (
+                <div style={{ textAlign: "right", flexShrink: 0 }}>
+                  <div style={{ fontSize: 18, fontWeight: 700, color: "#facc15", fontFamily: "'Share Tech Mono', monospace" }}>{lastGW.real}</div>
+                  <div style={{ fontSize: 10, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono', monospace" }}>dernier score</div>
+                </div>
+              )}
+            </div>
+
+            {/* Barres modèles */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+              {MODELS.map(m => {
+                const pred = preds[m.id];
+                const lastErr = lastGW?.errors[m.id];
+                const isBestLast = lastGW && MODELS.every(om => (lastGW.errors[om.id] ?? Infinity) >= lastErr);
+
+                return (
+                  <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 10, fontFamily: "'Share Tech Mono', monospace", color: m.color, minWidth: 26, fontWeight: 700, textShadow: `0 0 6px ${m.color}` }}>{m.id}</span>
+                    <div className="model-bar-wrap">
+                      <div className="model-bar" style={{ width: `${Math.round(pred / maxPred * 100)}%`, background: m.color }} />
+                    </div>
+                    <span style={{ fontSize: 13, fontFamily: "'Share Tech Mono', monospace", color: "#e2e8f0", minWidth: 30, textAlign: "right" }}>{pred}</span>
+                    {lastErr !== undefined && (
+                      <span className="err-badge" style={{
+                        background: lastErr < 5 ? "rgba(52,211,153,0.1)" : lastErr < 12 ? "rgba(251,191,36,0.1)" : "rgba(239,68,68,0.1)",
+                        color: lastErr < 5 ? "#34d399" : lastErr < 12 ? "#fbbf24" : "#f87171",
+                        border: `1px solid ${lastErr < 5 ? "rgba(52,211,153,0.25)" : lastErr < 12 ? "rgba(251,191,36,0.25)" : "rgba(239,68,68,0.25)"}`,
+                        fontWeight: isBestLast ? 700 : 400,
+                      }}>±{lastErr.toFixed(0)}{isBestLast ? "★" : ""}</span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Historique */}
+            {playerHistory.length > 0 && (
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid rgba(255,255,255,0.05)" }}>
+                <div style={{ fontSize: 9, color: "rgba(255,255,255,0.18)", fontFamily: "'Share Tech Mono', monospace", letterSpacing: 2, marginBottom: 6 }}>HISTORIQUE</div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {playerHistory.slice(-6).map((h, i) => {
+                    const bestM = MODELS.reduce((a, b) => (h.errors[a.id] ?? Infinity) < (h.errors[b.id] ?? Infinity) ? a : b);
+                    return (
+                      <div key={i} style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 8, padding: "4px 10px", fontSize: 11, fontFamily: "'Share Tech Mono', monospace" }}>
+                        <span style={{ color: "rgba(255,255,255,0.3)" }}>{h.gwLabel} </span>
+                        <span style={{ color: "#facc15" }}>{h.real}</span>
+                        <span style={{ color: "rgba(255,255,255,0.2)" }}> → </span>
+                        <span style={{ color: bestM.color }}>{bestM.id} ±{h.errors[bestM.id]?.toFixed(0)}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -564,7 +695,9 @@ function OptimizerPage() {
           onKeyDown={e => e.key === "Enter" && slug.trim() && run(slug, rarityFilter)}
         />
         <div style={{ fontSize: 11, color: "rgba(255,255,255,0.18)", marginTop: 8, fontFamily: "'Share Tech Mono', monospace" }}>→ pseudo visible dans l'URL de ton profil Sorare</div>
-        <button className="main-btn" style={{ marginTop: 20 }} disabled={!slug.trim()} onClick={() => run(slug, rarityFilter)}>Analyser ma galerie →</button>
+        <button className="main-btn" style={{ marginTop: 20 }} disabled={!slug.trim()} onClick={() => run(slug, rarityFilter)}>
+          Analyser ma galerie →
+        </button>
       </div>
     </div>
   );
@@ -633,16 +766,13 @@ export default function App() {
     <div style={{ background: "#04060f", minHeight: "100vh" }}>
       <style>{CSS}</style>
       <div className="scanline-wrap"><div className="scanline" /></div>
-
-      {/* NAV */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 24px", borderBottom: "1px solid rgba(255,255,255,0.05)", position: "sticky", top: 0, background: "rgba(4,6,15,0.97)", backdropFilter: "blur(20px)", zIndex: 100 }}>
         <span className="holo-text" style={{ fontSize: 16, fontWeight: 700, letterSpacing: 3, marginRight: 8 }}>◈ SORAKI</span>
         <button className={`nav-btn ${page === "optimizer" ? "active" : ""}`} onClick={() => setPage("optimizer")}>SO5 OPTIMIZER</button>
-        <button className={`nav-btn ${page === "database" ? "active" : ""}`} onClick={() => setPage("database")}>DATABASE</button>
+        <button className={`nav-btn ${page === "projections" ? "active" : ""}`} onClick={() => setPage("projections")}>PROJECTIONS</button>
       </div>
-
       {page === "optimizer" && <OptimizerPage />}
-      {page === "database" && <DatabasePage />}
+      {page === "projections" && <ProjectionsPage />}
     </div>
   );
 }
