@@ -1004,6 +1004,8 @@ function OddsPage() {
         const homeOdds = [], drawOdds = [], awayOdds = [];
         const overOdds = [], underOdds = [];
 
+        const bttsYesOdds = [], bttsNoOdds = [];
+
         for (const bm of (match.bookmakers || [])) {
           for (const market of (bm.markets || [])) {
             if (market.key === "h2h") {
@@ -1019,20 +1021,45 @@ function OddsPage() {
                 if (o.name === "Under" && Math.abs((o.point || 0) - 2.5) < 0.1) underOdds.push(o.price);
               });
             }
+            if (market.key === "btts") {
+              market.outcomes?.forEach(o => {
+                if (o.name === "Yes") bttsYesOdds.push(o.price);
+                if (o.name === "No") bttsNoOdds.push(o.price);
+              });
+            }
           }
         }
 
         const avg = arr => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+
+        // H2H — normalisé (retire marge bookmaker)
         const rawProbs = normalizeProbs([
           oddsToProb(avg(homeOdds)),
           oddsToProb(avg(drawOdds)),
           oddsToProb(avg(awayOdds)),
         ]);
 
+        // Over/Under — normalisés entre eux pour sommer à 100%
+        let overProb = null, underProb = null;
         const overAvg = avg(overOdds);
         const underAvg = avg(underOdds);
-        const overProb = overAvg ? oddsToProb(overAvg) : null;
-        const underProb = underAvg ? oddsToProb(underAvg) : null;
+        if (overAvg && underAvg) {
+          const ou = normalizeProbs([oddsToProb(overAvg), oddsToProb(underAvg)]);
+          overProb = ou[0];
+          underProb = ou[1];
+        } else if (overAvg) {
+          overProb = oddsToProb(overAvg);
+        }
+
+        // BTTS — normalisés entre eux pour sommer à 100%
+        let bttsYesProb = null, bttsNoProb = null;
+        const bttsYesAvg = avg(bttsYesOdds);
+        const bttsNoAvg = avg(bttsNoOdds);
+        if (bttsYesAvg && bttsNoAvg) {
+          const bt = normalizeProbs([oddsToProb(bttsYesAvg), oddsToProb(bttsNoAvg)]);
+          bttsYesProb = bt[0];
+          bttsNoProb = bt[1];
+        }
 
         const date = new Date(match.commence_time);
 
@@ -1048,6 +1075,8 @@ function OddsPage() {
           awayProb: rawProbs[2],
           overProb,
           underProb,
+          bttsYesProb,
+          bttsNoProb,
           bookmakers: match.bookmakers?.length || 0,
         };
       });
@@ -1061,36 +1090,61 @@ function OddsPage() {
     setLoading(false);
   };
 
-  // Couleur selon probabilité
-  const probColor = (p) => {
-    if (p >= 0.6) return "#34d399";
-    if (p >= 0.4) return "#4de8ff";
-    if (p >= 0.25) return "#fbbf24";
+  // Couleur selon probabilité (heat map)
+  const pColor = (p) => {
+    if (!p) return "rgba(255,255,255,0.2)";
+    if (p >= 0.65) return "#34d399";
+    if (p >= 0.50) return "#4de8ff";
+    if (p >= 0.35) return "#fbbf24";
     return "#f87171";
   };
 
-  // Barre de probabilité
-  const ProbBar = ({ label, prob, color, bold }) => (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-      <span style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", fontFamily: "'Share Tech Mono',monospace", minWidth: 28, textAlign: "right" }}>{label}</span>
-      <div style={{ flex: 1, height: 6, background: "rgba(255,255,255,0.05)", borderRadius: 3, overflow: "hidden" }}>
-        <div style={{ width: `${Math.round(prob * 100)}%`, height: "100%", background: color, borderRadius: 3, transition: "width 0.5s ease" }} />
-      </div>
-      <span style={{ fontSize: 13, fontFamily: "'Share Tech Mono',monospace", color: bold ? color : "#e2e8f0", fontWeight: bold ? 700 : 400, minWidth: 36, textAlign: "right" }}>
-        {Math.round(prob * 100)}%
-      </span>
-    </div>
+  // Cellule colorée
+  const PCell = ({ p, bold }) => (
+    <td style={{ padding: "10px 12px", textAlign: "center", fontFamily: "'Share Tech Mono',monospace", fontSize: 13, color: pColor(p), fontWeight: bold ? 700 : 400, whiteSpace: "nowrap" }}>
+      {p ? `${Math.round(p * 100)}%` : "—"}
+    </td>
   );
 
-  const wrap = { minHeight: "calc(100vh - 57px)", background: "#04060f", padding: "24px", fontFamily: "'Rajdhani', sans-serif" };
+  // Tri
+  const [sortCol, setSortCol] = useState("date");
+  const [sortDir, setSortDir] = useState("asc");
 
-  // Grouper par jour
-  const byDay = matches.reduce((acc, m) => {
+  const handleSort = (col) => {
+    if (sortCol === col) setSortDir(d => d === "asc" ? "desc" : "asc");
+    else { setSortCol(col); setSortDir("desc"); }
+  };
+
+  const sortArrow = (col) => sortCol === col ? (sortDir === "asc" ? " ↑" : " ↓") : "";
+
+  const sorted = useMemo(() => {
+    const list = [...matches];
+    list.sort((a, b) => {
+      const va = a[sortCol] ?? 0;
+      const vb = b[sortCol] ?? 0;
+      if (sortCol === "date") return sortDir === "asc" ? a.date - b.date : b.date - a.date;
+      return sortDir === "desc" ? vb - va : va - vb;
+    });
+    return list;
+  }, [matches, sortCol, sortDir]);
+
+  // Grouper par jour après tri
+  const byDay = useMemo(() => sorted.reduce((acc, m) => {
     const key = m.dateStr;
     if (!acc[key]) acc[key] = [];
     acc[key].push(m);
     return acc;
-  }, {});
+  }, {}), [sorted]);
+
+  const wrap = { minHeight: "calc(100vh - 57px)", background: "#04060f", padding: "24px", fontFamily: "'Rajdhani', sans-serif" };
+
+  const thStyle = (col) => ({
+    padding: "8px 12px", textAlign: "center", fontSize: 10, letterSpacing: 2,
+    color: sortCol === col ? "#4de8ff" : "rgba(255,255,255,0.25)",
+    fontFamily: "'Share Tech Mono',monospace", cursor: "pointer",
+    whiteSpace: "nowrap", userSelect: "none", borderBottom: "1px solid rgba(255,255,255,0.06)",
+    background: "rgba(4,6,15,0.97)",
+  });
 
   return (
     <div style={wrap}>
@@ -1099,7 +1153,7 @@ function OddsPage() {
         <div>
           <h1 className="holo-text" style={{ fontSize: 24, fontWeight: 700, letterSpacing: 2 }}>COTES PL</h1>
           <div style={{ fontSize: 12, color: "rgba(255,255,255,0.25)", fontFamily: "'Share Tech Mono',monospace", marginTop: 4 }}>
-            Probabilités calculées depuis {matches.length > 0 ? `${matches[0]?.bookmakers} bookmakers en moyenne` : "les bookmakers"}
+            Probabilités nettoyées de la marge bookmaker · Marge bookmaker retirée
             {remaining && <span style={{ marginLeft: 8, color: "rgba(77,232,255,0.5)" }}>· {remaining} crédits restants</span>}
           </div>
         </div>
@@ -1117,94 +1171,75 @@ function OddsPage() {
       {matches.length === 0 && !loading && (
         <div style={{ textAlign: "center", paddingTop: 80, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono',monospace", fontSize: 13, lineHeight: 2.2 }}>
           Clique sur "Charger les cotes" pour voir les prochains matchs PL<br />
-          Probabilités calculées depuis les cotes de 15+ bookmakers UK<br />
-          Marge bookmaker retirée pour des probabilités réelles
+          Probabilités calculées depuis 15+ bookmakers UK · Marge retirée
         </div>
       )}
 
-      {/* Matchs groupés par jour */}
-      {Object.entries(byDay).map(([day, dayMatches]) => (
-        <div key={day} style={{ marginBottom: 28 }}>
-          {/* Titre du jour */}
-          <div style={{ fontSize: 10, letterSpacing: 4, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono',monospace", textTransform: "uppercase", marginBottom: 12, paddingBottom: 8, borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-            {day}
-          </div>
-
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: 12 }}>
-            {dayMatches.map(m => {
-              const favorite = m.homeProb > m.awayProb ? "home" : "away";
-              const favProb = Math.max(m.homeProb, m.awayProb);
-              const isClose = Math.abs(m.homeProb - m.awayProb) < 0.1;
-
-              return (
-                <div key={m.id} className="proj-card" style={{ padding: "18px 20px" }}>
-                  {/* Teams + heure */}
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-                        <span style={{ fontSize: 15, fontWeight: 700, color: favorite === "home" ? "#f1f5f9" : "rgba(255,255,255,0.5)", fontFamily: "'Rajdhani',sans-serif" }}>
-                          {m.home}
-                        </span>
-                        {favorite === "home" && (
-                          <span style={{ fontSize: 10, background: "rgba(52,211,153,0.1)", color: "#34d399", border: "1px solid rgba(52,211,153,0.25)", borderRadius: 4, padding: "1px 6px", fontFamily: "'Share Tech Mono',monospace" }}>
-                            FAV {Math.round(favProb * 100)}%
-                          </span>
-                        )}
-                      </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <span style={{ fontSize: 15, fontWeight: 700, color: favorite === "away" ? "#f1f5f9" : "rgba(255,255,255,0.5)", fontFamily: "'Rajdhani',sans-serif" }}>
-                          {m.away}
-                        </span>
-                        {favorite === "away" && (
-                          <span style={{ fontSize: 10, background: "rgba(52,211,153,0.1)", color: "#34d399", border: "1px solid rgba(52,211,153,0.25)", borderRadius: 4, padding: "1px 6px", fontFamily: "'Share Tech Mono',monospace" }}>
-                            FAV {Math.round(favProb * 100)}%
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    <div style={{ textAlign: "right", flexShrink: 0 }}>
-                      <div style={{ fontSize: 14, fontWeight: 700, color: "#4de8ff", fontFamily: "'Share Tech Mono',monospace" }}>{m.timeStr}</div>
-                      <div style={{ fontSize: 10, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono',monospace", marginTop: 2 }}>{m.bookmakers} bkm</div>
-                      {isClose && (
-                        <div style={{ fontSize: 9, color: "#fbbf24", fontFamily: "'Share Tech Mono',monospace", marginTop: 2 }}>SERRÉ</div>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Barres H/D/A */}
-                  <ProbBar label="DOM" prob={m.homeProb} color={probColor(m.homeProb)} bold={favorite === "home"} />
-                  <ProbBar label="NUL" prob={m.drawProb} color="#888780" bold={false} />
-                  <ProbBar label="EXT" prob={m.awayProb} color={probColor(m.awayProb)} bold={favorite === "away"} />
-
-                  {/* Over/Under */}
-                  {m.overProb !== null && (
-                    <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid rgba(255,255,255,0.05)", display: "flex", gap: 12 }}>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontSize: 9, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono',monospace", letterSpacing: 2, marginBottom: 4 }}>OVER 2.5</div>
-                        <div style={{ height: 4, background: "rgba(255,255,255,0.05)", borderRadius: 2, overflow: "hidden" }}>
-                          <div style={{ width: `${Math.round(m.overProb * 100)}%`, height: "100%", background: m.overProb > 0.55 ? "#34d399" : "#fbbf24", borderRadius: 2 }} />
-                        </div>
-                        <div style={{ fontSize: 12, color: m.overProb > 0.55 ? "#34d399" : "#fbbf24", fontFamily: "'Share Tech Mono',monospace", marginTop: 3, fontWeight: 700 }}>
-                          {Math.round(m.overProb * 100)}%
-                        </div>
-                      </div>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontSize: 9, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono',monospace", letterSpacing: 2, marginBottom: 4 }}>UNDER 2.5</div>
-                        <div style={{ height: 4, background: "rgba(255,255,255,0.05)", borderRadius: 2, overflow: "hidden" }}>
-                          <div style={{ width: `${Math.round(m.underProb * 100)}%`, height: "100%", background: "#8a7fff", borderRadius: 2 }} />
-                        </div>
-                        <div style={{ fontSize: 12, color: "#8a7fff", fontFamily: "'Share Tech Mono',monospace", marginTop: 3 }}>
-                          {Math.round(m.underProb * 100)}%
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+      {matches.length > 0 && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "'Rajdhani',sans-serif" }}>
+            <thead>
+              <tr>
+                <th style={{ ...thStyle("date"), textAlign: "left", paddingLeft: 16 }} onClick={() => handleSort("date")}>Match{sortArrow("date")}</th>
+                <th style={thStyle("date")}>Heure</th>
+                <th style={thStyle("homeProb")} onClick={() => handleSort("homeProb")}>DOM{sortArrow("homeProb")}</th>
+                <th style={thStyle("drawProb")} onClick={() => handleSort("drawProb")}>NUL{sortArrow("drawProb")}</th>
+                <th style={thStyle("awayProb")} onClick={() => handleSort("awayProb")}>EXT{sortArrow("awayProb")}</th>
+                <th style={thStyle("overProb")} onClick={() => handleSort("overProb")}>O2.5{sortArrow("overProb")}</th>
+                <th style={thStyle("underProb")} onClick={() => handleSort("underProb")}>U2.5{sortArrow("underProb")}</th>
+                <th style={thStyle("bttsYesProb")} onClick={() => handleSort("bttsYesProb")}>BTTS{sortArrow("bttsYesProb")}</th>
+                <th style={thStyle("bttsNoProb")} onClick={() => handleSort("bttsNoProb")}>CS{sortArrow("bttsNoProb")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(byDay).map(([day, dayMatches]) => (
+                <>
+                  {/* Séparateur de jour */}
+                  <tr key={`day-${day}`}>
+                    <td colSpan={9} style={{ padding: "10px 16px 6px", fontSize: 10, letterSpacing: 4, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono',monospace", textTransform: "uppercase", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+                      {day}
+                    </td>
+                  </tr>
+                  {dayMatches.map(m => {
+                    const isHome = m.homeProb > m.awayProb;
+                    const isClose = Math.abs(m.homeProb - m.awayProb) < 0.08;
+                    return (
+                      <tr key={m.id} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}
+                        onMouseEnter={e => e.currentTarget.style.background = "rgba(255,255,255,0.03)"}
+                        onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+                      >
+                        {/* Match */}
+                        <td style={{ padding: "10px 16px", minWidth: 260 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <div>
+                              <span style={{ fontSize: 14, fontWeight: 700, color: isHome ? "#f1f5f9" : "rgba(255,255,255,0.45)", fontFamily: "'Rajdhani',sans-serif" }}>{m.home}</span>
+                              <span style={{ color: "rgba(255,255,255,0.2)", margin: "0 6px", fontSize: 12 }}>vs</span>
+                              <span style={{ fontSize: 14, fontWeight: 700, color: !isHome ? "#f1f5f9" : "rgba(255,255,255,0.45)", fontFamily: "'Rajdhani',sans-serif" }}>{m.away}</span>
+                            </div>
+                            {isClose && (
+                              <span style={{ fontSize: 9, background: "rgba(251,191,36,0.1)", color: "#fbbf24", border: "1px solid rgba(251,191,36,0.25)", borderRadius: 4, padding: "1px 5px", fontFamily: "'Share Tech Mono',monospace" }}>SERRÉ</span>
+                            )}
+                          </div>
+                        </td>
+                        {/* Heure */}
+                        <td style={{ padding: "10px 12px", textAlign: "center", fontSize: 12, color: "#4de8ff", fontFamily: "'Share Tech Mono',monospace", whiteSpace: "nowrap" }}>{m.timeStr}</td>
+                        {/* Probas */}
+                        <PCell p={m.homeProb} bold={isHome} />
+                        <PCell p={m.drawProb} />
+                        <PCell p={m.awayProb} bold={!isHome} />
+                        <PCell p={m.overProb} bold={m.overProb > 0.55} />
+                        <PCell p={m.underProb} />
+                        <PCell p={m.bttsYesProb} bold={m.bttsYesProb > 0.55} />
+                        <PCell p={m.bttsNoProb} bold={m.bttsNoProb > 0.55} />
+                      </tr>
+                    );
+                  })}
+                </>
+              ))}
+            </tbody>
+          </table>
         </div>
-      ))}
+      )}
     </div>
   );
 }
