@@ -17,6 +17,7 @@ const MODELS = [
 
 // ─── QUERIES ──────────────────────────────────────────────────────────────────
 
+// On récupère sport sur la carte pour filtrer football uniquement
 const USER_CARDS_QUERY = `
   query UserCards($slug: String!) {
     user(slug: $slug) {
@@ -25,6 +26,7 @@ const USER_CARDS_QUERY = `
         nodes {
           slug
           rarityTyped
+          sport
           anyPlayer {
             slug
             displayName
@@ -46,12 +48,13 @@ const USER_CARDS_QUERY = `
   }
 `;
 
-// Query pour récupérer les scores réels après la GW
+// Scores réels après GW - sans champ game (non dispo sur interface)
 const REAL_SCORES_QUERY = `
   query RealScores($slug: String!) {
     user(slug: $slug) {
       cards(first: 20) {
         nodes {
+          sport
           anyPlayer {
             slug
             playerGameScores(last: 1) {
@@ -87,9 +90,7 @@ function normalizeCard(c) {
   const hasSuspension = (p?.activeSuspensions || []).some(s => s.active);
   const l15 = p?.averageScore || 0;
   const proj = p?.nextClassicFixtureProjectedScore || 0;
-
-  // L5 et L40 estimés (sans clé API on n'a que L15)
-  const slugHash = p?.slug?.split("").reduce((a, c) => a + c.charCodeAt(0), 0) || 0;
+  const slugHash = p?.slug?.split("").reduce((a, ch) => a + ch.charCodeAt(0), 0) || 0;
   const variation = ((slugHash % 20) - 10) / 100;
   const l5 = Math.max(0, l15 * (1 + variation));
   const l40 = Math.max(0, l15 * (1 - variation * 0.5));
@@ -98,18 +99,14 @@ function normalizeCard(c) {
     slug: p?.slug,
     cardSlug: c.slug,
     rarity: c.rarityTyped,
+    sport: c.sport,
     displayName: p?.displayName,
     position: p?.anyPositions?.[0],
     club,
-    l5,
-    l15,
-    l40,
-    proj,
-    isHome,
-    opponent,
+    l5, l15, l40, proj,
+    isHome, opponent,
     gameDate: ng?.date ? new Date(ng.date).toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" }) : null,
-    hasInjury,
-    hasSuspension,
+    hasInjury, hasSuspension,
   };
 }
 
@@ -214,8 +211,7 @@ const CSS = `
   .action-btn {
     border: none; border-radius: 10px; padding: 10px 18px;
     font-size: 13px; font-weight: 700; cursor: pointer;
-    font-family: 'Share Tech Mono', monospace; letter-spacing: 1px;
-    transition: all 0.15s;
+    font-family: 'Share Tech Mono', monospace; letter-spacing: 1px; transition: all 0.15s;
   }
   .action-btn.green { background: rgba(52,211,153,0.12); color: #34d399; border: 1px solid rgba(52,211,153,0.3); }
   .action-btn.green:hover { background: rgba(52,211,153,0.2); }
@@ -256,21 +252,16 @@ const CSS = `
   .card-chip.captain { border-color: transparent; }
   .proj-card {
     background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06);
-    border-radius: 14px; padding: 16px 20px; margin-bottom: 10px;
-    transition: background 0.15s;
+    border-radius: 14px; padding: 16px 20px; margin-bottom: 10px; transition: background 0.15s;
   }
   .proj-card:hover { background: rgba(255,255,255,0.035); }
   .model-bar-wrap { height: 4px; background: rgba(255,255,255,0.06); border-radius: 2px; overflow: hidden; flex: 1; }
   .model-bar { height: 100%; border-radius: 2px; transition: width 0.5s ease; }
   .err-badge {
     display: inline-block; padding: 2px 7px; border-radius: 5px;
-    font-size: 11px; font-family: 'Share Tech Mono', monospace;
-    min-width: 42px; text-align: center;
+    font-size: 11px; font-family: 'Share Tech Mono', monospace; min-width: 42px; text-align: center;
   }
-  .mae-box {
-    border-radius: 10px; padding: 10px 14px; text-align: center; min-width: 80px;
-    transition: all 0.2s;
-  }
+  .mae-box { border-radius: 10px; padding: 10px 14px; text-align: center; min-width: 80px; transition: all 0.2s; }
 `;
 
 // ─── COMPONENTS ───────────────────────────────────────────────────────────────
@@ -330,10 +321,7 @@ function ProjectionsPage() {
   const [updating, setUpdating] = useState(false);
   const [error, setError] = useState("");
   const [updateMsg, setUpdateMsg] = useState("");
-
-  // pendingPredictions[playerSlug] = { predictions, gwLabel, gwDate }
   const [pendingPredictions, setPendingPredictions] = useState({});
-  // history[playerSlug] = [{ gw, gwDate, predictions, real, errors }]
   const [history, setHistory] = useState({});
 
   const loadPlayers = async (slug) => {
@@ -344,17 +332,16 @@ function ProjectionsPage() {
       if (!data?.data?.user) throw new Error("Slug introuvable.");
       const raw = (data.data.user.cards?.nodes || [])
         .map(normalizeCard)
-        .filter(p => p.position && p.displayName && p.l15 > 0);
-      if (!raw.length) throw new Error("Aucune carte trouvée.");
+        // Filtre FOOTBALL uniquement
+        .filter(p => p.sport === "FOOTBALL" && p.position && p.displayName && p.l15 > 0);
+      if (!raw.length) throw new Error("Aucune carte football trouvée.");
 
-      // Snapshot des projections pour cette GW
       const now = new Date();
       const gwLabel = `GW ${now.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" })}`;
-      const gwDate = now.toISOString();
       const preds = {};
       raw.forEach(p => {
         const m = computeModels(p);
-        if (m) preds[p.slug] = { predictions: m, gwLabel, gwDate };
+        if (m) preds[p.slug] = { predictions: m, gwLabel };
       });
 
       setPlayers(raw);
@@ -366,11 +353,9 @@ function ProjectionsPage() {
     setLoading(false);
   };
 
-  // Fetch les vrais scores depuis l'API et compare avec les projections
   const fetchRealScores = async () => {
     if (!userSlug || !Object.keys(pendingPredictions).length) return;
     setUpdating(true); setUpdateMsg("Récupération des scores réels...");
-
     try {
       const data = await gql(REAL_SCORES_QUERY, { slug: userSlug });
       if (data?.errors?.length) throw new Error(data.errors[0].message);
@@ -380,25 +365,20 @@ function ProjectionsPage() {
       let updated = 0;
 
       nodes.forEach(c => {
+        // Filtre football uniquement
+        if (c.sport !== "FOOTBALL") return;
         const pSlug = c.anyPlayer?.slug;
         const scores = c.anyPlayer?.playerGameScores || [];
         if (!pSlug || !scores.length || !pendingPredictions[pSlug]) return;
 
-        const lastScore = scores[0];
-        const real = lastScore?.score;
-        const gameDate = lastScore?.game?.date;
-        if (real === null || real === undefined) return;
+        const real = scores[0]?.score;
+        if (!real || real <= 0) return;
 
-        const { predictions, gwLabel, gwDate } = pendingPredictions[pSlug];
-
-        // Vérifier que ce score correspond à la GW en cours (après la snapshot)
-        if (gameDate && new Date(gameDate) < new Date(gwDate)) return;
-
+        const { predictions, gwLabel } = pendingPredictions[pSlug];
         const errors = {};
         MODELS.forEach(m => { errors[m.id] = Math.abs(predictions[m.id] - real); });
 
         if (!newHistory[pSlug]) newHistory[pSlug] = [];
-        // Éviter les doublons
         const alreadyExists = newHistory[pSlug].some(h => h.gwLabel === gwLabel && h.real === real);
         if (!alreadyExists) {
           newHistory[pSlug].push({ gwLabel, predictions, real, errors });
@@ -407,26 +387,21 @@ function ProjectionsPage() {
       });
 
       setHistory(newHistory);
-      setUpdateMsg(updated > 0 ? `✓ ${updated} scores mis à jour` : "Aucun nouveau score disponible — les matchs ne sont peut-être pas encore joués.");
+      setUpdateMsg(updated > 0 ? `✓ ${updated} scores mis à jour` : "Aucun nouveau score — les matchs ne sont peut-être pas encore joués.");
     } catch (e) {
       setUpdateMsg(`Erreur : ${e.message}`);
     }
     setUpdating(false);
-    setTimeout(() => setUpdateMsg(""), 4000);
+    setTimeout(() => setUpdateMsg(""), 5000);
   };
 
-  // MAE globale par modèle
   const globalMAE = useMemo(() => {
-    const totals = {};
-    const counts = {};
+    const totals = {}; const counts = {};
     MODELS.forEach(m => { totals[m.id] = 0; counts[m.id] = 0; });
     Object.values(history).forEach(gwList => {
       gwList.forEach(gw => {
         MODELS.forEach(m => {
-          if (gw.errors[m.id] !== undefined) {
-            totals[m.id] += gw.errors[m.id];
-            counts[m.id]++;
-          }
+          if (gw.errors[m.id] !== undefined) { totals[m.id] += gw.errors[m.id]; counts[m.id]++; }
         });
       });
     });
@@ -449,16 +424,14 @@ function ProjectionsPage() {
 
   const wrap = { minHeight: "calc(100vh - 57px)", background: "#04060f", padding: "24px", fontFamily: "'Rajdhani', sans-serif" };
 
-  // ── Login screen ──
   if (!userSlug) return (
     <div style={{ ...wrap, display: "flex", alignItems: "center", justifyContent: "center" }}>
       <div className="holo-border" style={{ background: "rgba(6,10,22,0.95)", borderRadius: 20, padding: "36px 32px", width: "100%", maxWidth: 460 }}>
         <div style={{ fontSize: 11, letterSpacing: 5, color: "rgba(255,255,255,0.25)", fontFamily: "'Share Tech Mono', monospace", marginBottom: 8 }}>◈ SORAKI v1.0</div>
         <h1 className="holo-text" style={{ fontSize: 32, fontWeight: 700, letterSpacing: 2, marginBottom: 8 }}>PROJECTIONS</h1>
         <div style={{ fontSize: 13, color: "rgba(255,255,255,0.3)", fontFamily: "'Share Tech Mono', monospace", marginBottom: 6, lineHeight: 1.7 }}>
-          6 modèles en compétition sur tes vraies cartes.<br />
-          Après chaque GW, les scores réels sont récupérés<br />
-          automatiquement depuis l'API Sorare.
+          6 modèles en compétition sur tes vraies cartes football.<br />
+          Scores réels récupérés automatiquement après chaque GW.
         </div>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 24 }}>
           {MODELS.map(m => (
@@ -468,8 +441,7 @@ function ProjectionsPage() {
         {error && <div style={{ background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 10, padding: "12px 16px", color: "#fca5a5", fontSize: 13, marginBottom: 16, fontFamily: "'Share Tech Mono', monospace" }}>{error}</div>}
         <div style={{ fontSize: 11, color: "rgba(255,255,255,0.25)", marginBottom: 8, letterSpacing: 3, fontFamily: "'Share Tech Mono', monospace" }}>SLUG SORARE</div>
         <input className="soraki-input" type="text" style={{ width: "100%", padding: "13px 16px", fontSize: 15, marginBottom: 12 }}
-          placeholder="ex: rakijako"
-          value={slugInput}
+          placeholder="ex: rakijako" value={slugInput}
           onChange={e => setSlugInput(e.target.value)}
           onKeyDown={e => e.key === "Enter" && slugInput.trim() && loadPlayers(slugInput)}
         />
@@ -480,53 +452,36 @@ function ProjectionsPage() {
     </div>
   );
 
-  // ── Main ──
   return (
     <div style={wrap}>
-
-      {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>
         <div>
           <h1 className="holo-text" style={{ fontSize: 24, fontWeight: 700, letterSpacing: 2 }}>PROJECTIONS</h1>
           <div style={{ fontSize: 12, color: "rgba(255,255,255,0.25)", fontFamily: "'Share Tech Mono', monospace", marginTop: 4 }}>
-            {players.length} joueurs · {totalGWs} GW archivées · {userSlug}
+            {players.length} cartes football · {totalGWs} GW archivées · {userSlug}
           </div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          {updateMsg && (
-            <span style={{ fontSize: 12, color: updateMsg.startsWith("✓") ? "#34d399" : "#fca5a5", fontFamily: "'Share Tech Mono', monospace" }}>
-              {updateMsg}
-            </span>
-          )}
+          {updateMsg && <span style={{ fontSize: 12, color: updateMsg.startsWith("✓") ? "#34d399" : "#fca5a5", fontFamily: "'Share Tech Mono', monospace" }}>{updateMsg}</span>}
           <button className="action-btn green" onClick={fetchRealScores} disabled={updating}>
             {updating ? "Mise à jour..." : "↓ Récupérer les scores réels"}
           </button>
-          <button className="action-btn gray" onClick={() => { setUserSlug(""); setPlayers([]); setPendingPredictions({}); }}>
-            ← Retour
-          </button>
+          <button className="action-btn gray" onClick={() => { setUserSlug(""); setPlayers([]); setPendingPredictions({}); }}>← Retour</button>
         </div>
       </div>
 
-      {/* MAE globale */}
       {totalGWs > 0 && (
         <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 14, padding: "16px 20px", marginBottom: 20 }}>
           <div style={{ fontSize: 10, letterSpacing: 3, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono', monospace", marginBottom: 12 }}>
-            ERREUR MOYENNE ABSOLUE — {totalGWs} GAME WEEK{totalGWs > 1 ? "S" : ""}
+            ERREUR MOYENNE ABSOLUE — {totalGWs} GW
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             {MODELS.map(m => {
               const isBest = bestModel?.id === m.id;
               return (
-                <div key={m.id} className="mae-box" style={{
-                  background: isBest ? m.color + "15" : "rgba(255,255,255,0.02)",
-                  border: `1px solid ${isBest ? m.color + "40" : "rgba(255,255,255,0.05)"}`,
-                }}>
-                  <div style={{ fontSize: 10, color: isBest ? m.color : "rgba(255,255,255,0.3)", fontFamily: "'Share Tech Mono', monospace', marginBottom: 4" }}>
-                    {m.id}{isBest ? " ★" : ""}
-                  </div>
-                  <div style={{ fontSize: 20, fontWeight: 700, color: isBest ? m.color : "rgba(255,255,255,0.4)", fontFamily: "'Share Tech Mono', monospace" }}>
-                    {globalMAE[m.id] ?? "—"}
-                  </div>
+                <div key={m.id} className="mae-box" style={{ background: isBest ? m.color + "15" : "rgba(255,255,255,0.02)", border: `1px solid ${isBest ? m.color + "40" : "rgba(255,255,255,0.05)"}` }}>
+                  <div style={{ fontSize: 10, color: isBest ? m.color : "rgba(255,255,255,0.3)", fontFamily: "'Share Tech Mono', monospace", marginBottom: 4 }}>{m.id}{isBest ? " ★" : ""}</div>
+                  <div style={{ fontSize: 20, fontWeight: 700, color: isBest ? m.color : "rgba(255,255,255,0.4)", fontFamily: "'Share Tech Mono', monospace" }}>{globalMAE[m.id] ?? "—"}</div>
                   <div style={{ fontSize: 10, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono', monospace", marginTop: 2 }}>{m.label}</div>
                 </div>
               );
@@ -541,12 +496,10 @@ function ProjectionsPage() {
         </div>
       )}
 
-      {/* Instructions */}
-      <div style={{ fontSize: 11, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono', monospace", marginBottom: 16, lineHeight: 1.8 }}>
-        ↓ Projections en cours · Après les matchs, clique "Récupérer les scores réels" pour comparer automatiquement
+      <div style={{ fontSize: 11, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono', monospace", marginBottom: 16 }}>
+        ↓ Projections en cours · Après les matchs, clique "Récupérer les scores réels"
       </div>
 
-      {/* Player cards */}
       {players.map(p => {
         const preds = pendingPredictions[p.slug]?.predictions;
         if (!preds) return null;
@@ -559,7 +512,6 @@ function ProjectionsPage() {
 
         return (
           <div key={p.slug} className="proj-card">
-            {/* Header joueur */}
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
               <div style={{ width: 8, height: 8, borderRadius: "50%", background: rarityColor, boxShadow: `0 0 6px ${rarityColor}`, flexShrink: 0 }} />
               <span style={{ background: posColor + "14", color: posColor, border: `1px solid ${posColor}44`, borderRadius: 5, padding: "1px 7px", fontSize: 10, fontWeight: 700, fontFamily: "'Share Tech Mono', monospace" }}>{posLabel}</span>
@@ -575,7 +527,6 @@ function ProjectionsPage() {
                   {!p.opponent && <span style={{ marginLeft: 8, color: "#f87171" }}>NG</span>}
                 </div>
               </div>
-              {/* Score réel de la dernière GW */}
               {lastGW && (
                 <div style={{ textAlign: "right", flexShrink: 0 }}>
                   <div style={{ fontSize: 18, fontWeight: 700, color: "#facc15", fontFamily: "'Share Tech Mono', monospace" }}>{lastGW.real}</div>
@@ -584,13 +535,11 @@ function ProjectionsPage() {
               )}
             </div>
 
-            {/* Barres modèles */}
             <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
               {MODELS.map(m => {
                 const pred = preds[m.id];
                 const lastErr = lastGW?.errors[m.id];
                 const isBestLast = lastGW && MODELS.every(om => (lastGW.errors[om.id] ?? Infinity) >= lastErr);
-
                 return (
                   <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <span style={{ fontSize: 10, fontFamily: "'Share Tech Mono', monospace", color: m.color, minWidth: 26, fontWeight: 700, textShadow: `0 0 6px ${m.color}` }}>{m.id}</span>
@@ -611,7 +560,6 @@ function ProjectionsPage() {
               })}
             </div>
 
-            {/* Historique */}
             {playerHistory.length > 0 && (
               <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid rgba(255,255,255,0.05)" }}>
                 <div style={{ fontSize: 9, color: "rgba(255,255,255,0.18)", fontFamily: "'Share Tech Mono', monospace", letterSpacing: 2, marginBottom: 6 }}>HISTORIQUE</div>
@@ -654,8 +602,10 @@ function OptimizerPage() {
       const data = await gql(USER_CARDS_QUERY, { slug: currentSlug.trim().toLowerCase() });
       if (data?.errors?.length) throw new Error(data.errors[0].message);
       if (!data?.data?.user) throw new Error("Slug introuvable — vérifie ton pseudo Sorare.");
-      const raw = (data.data.user.cards?.nodes || []).map(normalizeCard).filter(c => c.position && c.displayName);
-      if (!raw.length) throw new Error("Aucune carte trouvée pour ce compte.");
+      const raw = (data.data.user.cards?.nodes || [])
+        .map(normalizeCard)
+        .filter(c => c.sport === "FOOTBALL" && c.position && c.displayName);
+      if (!raw.length) throw new Error("Aucune carte football trouvée.");
       setCards(raw);
       const filtered = filter === "all" ? raw : raw.filter(c => c.rarity?.toLowerCase() === filter);
       const res = optimizeLineup(filtered);
@@ -760,7 +710,6 @@ function OptimizerPage() {
 
 export default function App() {
   const [page, setPage] = useState("optimizer");
-
   return (
     <div style={{ background: "#04060f", minHeight: "100vh" }}>
       <style>{CSS}</style>
