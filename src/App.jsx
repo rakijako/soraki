@@ -56,7 +56,6 @@ const REAL_SCORES_QUERY = `
             slug
             playerGameScores(last: 1) {
               score
-              game { date id }
             }
           }
         }
