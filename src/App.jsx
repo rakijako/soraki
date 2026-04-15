@@ -5,7 +5,10 @@ const POS_COLOR = { GK: "#fbbf24", DEF: "#60a5fa", MID: "#34d399", FWD: "#f87171
 const POS_LABEL = { Goalkeeper: "GK", Defender: "DEF", Midfielder: "MID", Forward: "FWD" };
 const POS_SLOTS = ["Goalkeeper", "Defender", "Midfielder", "Forward", "Extra"];
 const SLOT_LABEL = { Goalkeeper: "Gardien", Defender: "Défenseur", Midfielder: "Milieu", Forward: "Attaquant", Extra: "Extra" };
-const LS_KEY = "soraki_projection_history";
+
+// localStorage keys
+const LS_HISTORY = "soraki_history_v2";
+const LS_SNAPSHOTS = "soraki_snapshots_v2";
 
 const MODELS = [
   { id: "M1", label: "Baseline",     color: "#888780" },
@@ -18,7 +21,6 @@ const MODELS = [
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
-// Retourne la clé de semaine ISO : "2026-W15"
 function getISOWeekKey(date = new Date()) {
   const d = new Date(date);
   d.setHours(0, 0, 0, 0);
@@ -28,20 +30,14 @@ function getISOWeekKey(date = new Date()) {
   return `${d.getFullYear()}-W${String(weekNum).padStart(2, "0")}`;
 }
 
-// localStorage helpers
-function loadHistory() {
-  try {
-    const raw = localStorage.getItem(LS_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch { return {}; }
+function loadLS(key, fallback = {}) {
+  try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : fallback; }
+  catch { return fallback; }
 }
 
-function saveHistory(history) {
-  try {
-    localStorage.setItem(LS_KEY, JSON.stringify(history));
-  } catch (e) {
-    console.warn("localStorage plein ou indisponible", e);
-  }
+function saveLS(key, data) {
+  try { localStorage.setItem(key, JSON.stringify(data)); }
+  catch (e) { console.warn("localStorage plein", e); }
 }
 
 // ─── QUERIES ──────────────────────────────────────────────────────────────────
@@ -52,21 +48,13 @@ const USER_CARDS_QUERY = `
       slug
       cards(first: 20) {
         nodes {
-          slug
-          rarityTyped
-          sport
+          slug rarityTyped sport
           anyPlayer {
-            slug
-            displayName
-            anyPositions
+            slug displayName anyPositions
             activeClub { name slug }
             averageScore(type: LAST_FIFTEEN_SO5_AVERAGE_SCORE)
             nextClassicFixtureProjectedScore
-            nextGame {
-              date
-              homeTeam { name }
-              awayTeam { name }
-            }
+            nextGame { date homeTeam { name } awayTeam { name } }
             activeInjuries { active }
             activeSuspensions { active }
           }
@@ -84,9 +72,7 @@ const REAL_SCORES_QUERY = `
           sport
           anyPlayer {
             slug
-            playerGameScores(last: 1) {
-              score
-            }
+            playerGameScores(last: 1) { score }
           }
         }
       }
@@ -197,6 +183,8 @@ const CSS = `
   .action-btn { border: none; border-radius: 10px; padding: 10px 18px; font-size: 13px; font-weight: 700; cursor: pointer; font-family: 'Share Tech Mono', monospace; letter-spacing: 1px; transition: all 0.15s; }
   .action-btn.green { background: rgba(52,211,153,0.12); color: #34d399; border: 1px solid rgba(52,211,153,0.3); }
   .action-btn.green:hover { background: rgba(52,211,153,0.2); }
+  .action-btn.blue { background: rgba(77,232,255,0.08); color: #4de8ff; border: 1px solid rgba(77,232,255,0.25); }
+  .action-btn.blue:hover { background: rgba(77,232,255,0.15); }
   .action-btn.gray { background: rgba(255,255,255,0.04); color: rgba(255,255,255,0.4); border: 1px solid rgba(255,255,255,0.08); }
   .action-btn.red { background: rgba(239,68,68,0.08); color: #f87171; border: 1px solid rgba(239,68,68,0.2); }
   .action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -217,6 +205,9 @@ const CSS = `
   .model-bar { height: 100%; border-radius: 2px; transition: width 0.5s ease; }
   .err-badge { display: inline-block; padding: 2px 7px; border-radius: 5px; font-size: 11px; font-family: 'Share Tech Mono', monospace; min-width: 42px; text-align: center; }
   .mae-box { border-radius: 10px; padding: 10px 14px; text-align: center; min-width: 80px; transition: all 0.2s; }
+  .week-pill { display: inline-flex; align-items: center; gap: 6px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 20px; padding: 4px 12px; font-family: 'Share Tech Mono', monospace; font-size: 11px; color: rgba(255,255,255,0.4); }
+  .week-pill.active { background: rgba(77,232,255,0.08); border-color: rgba(77,232,255,0.3); color: #4de8ff; }
+  .week-pill.done { background: rgba(52,211,153,0.06); border-color: rgba(52,211,153,0.25); color: #34d399; }
 `;
 
 // ─── COMPONENTS ───────────────────────────────────────────────────────────────
@@ -273,18 +264,27 @@ function ProjectionsPage() {
   const [players, setPlayers] = useState([]);
   const [loading, setLoading] = useState(false);
   const [updating, setUpdating] = useState(false);
+  const [snapshotting, setSnapshotting] = useState(false);
   const [error, setError] = useState("");
-  const [updateMsg, setUpdateMsg] = useState("");
-  const [pendingPredictions, setPendingPredictions] = useState({});
+  const [msg, setMsg] = useState("");
 
-  // Historique persisté dans localStorage
-  const [history, setHistory] = useState(() => loadHistory());
+  // snapshots[weekKey][playerSlug] = { predictions, playerInfo }
+  const [snapshots, setSnapshots] = useState(() => loadLS(LS_SNAPSHOTS));
+  // history[playerSlug] = [{ weekKey, predictions, real, errors, entryKey }]
+  const [history, setHistory] = useState(() => loadLS(LS_HISTORY));
 
-  // Sauvegarde automatique à chaque changement d'historique
-  useEffect(() => {
-    saveHistory(history);
-  }, [history]);
+  const currentWeek = getISOWeekKey();
 
+  // Sauvegarde auto
+  useEffect(() => { saveLS(LS_SNAPSHOTS, snapshots); }, [snapshots]);
+  useEffect(() => { saveLS(LS_HISTORY, history); }, [history]);
+
+  const showMsg = (text, duration = 5000) => {
+    setMsg(text);
+    setTimeout(() => setMsg(""), duration);
+  };
+
+  // Charge les cartes pour affichage
   const loadPlayers = async (slug) => {
     setLoading(true); setError("");
     try {
@@ -295,31 +295,66 @@ function ProjectionsPage() {
         .map(normalizeCard)
         .filter(p => p.sport === "FOOTBALL" && p.position && p.displayName && p.l15 > 0);
       if (!raw.length) throw new Error("Aucune carte football trouvée.");
-
-      const weekKey = getISOWeekKey();
-      const preds = {};
-      raw.forEach(p => {
-        const m = computeModels(p);
-        if (m) preds[p.slug] = { predictions: m, weekKey };
-      });
-
       setPlayers(raw);
       setUserSlug(slug.trim().toLowerCase());
-      setPendingPredictions(preds);
-    } catch (e) {
-      setError(e.message);
-    }
+    } catch (e) { setError(e.message); }
     setLoading(false);
   };
 
+  // ÉTAPE 1 : Snapshot des projections AVANT la GW
+  // Ne peut être fait qu'une fois par semaine ISO
+  const snapshotProjections = async () => {
+    if (snapshots[currentWeek]) {
+      showMsg("⚠ Snapshot déjà fait pour cette semaine — attend la prochaine GW.");
+      return;
+    }
+    setSnapshotting(true);
+    try {
+      const data = await gql(USER_CARDS_QUERY, { slug: userSlug });
+      if (data?.errors?.length) throw new Error(data.errors[0].message);
+      const raw = (data.data.user.cards?.nodes || [])
+        .map(normalizeCard)
+        .filter(p => p.sport === "FOOTBALL" && p.position && p.displayName && p.l15 > 0);
+
+      const weekSnapshot = {};
+      raw.forEach(p => {
+        const m = computeModels(p);
+        if (!m) return;
+        weekSnapshot[p.slug] = {
+          predictions: m,
+          displayName: p.displayName,
+          club: p.club,
+          position: p.position,
+          rarity: p.rarity,
+          isHome: p.isHome,
+          opponent: p.opponent,
+          gameDate: p.gameDate,
+          l15: p.l15,
+          proj: p.proj,
+        };
+      });
+
+      setSnapshots(prev => ({ ...prev, [currentWeek]: weekSnapshot }));
+      setPlayers(raw);
+      showMsg(`✓ Snapshot sauvegardé pour ${currentWeek} — ${raw.length} joueurs`);
+    } catch (e) { showMsg(`Erreur : ${e.message}`); }
+    setSnapshotting(false);
+  };
+
+  // ÉTAPE 2 : Récupère les scores réels et compare avec le snapshot de la MÊME semaine
   const fetchRealScores = async () => {
-    if (!userSlug || !Object.keys(pendingPredictions).length) return;
-    setUpdating(true); setUpdateMsg("Récupération des scores réels...");
+    if (!snapshots[currentWeek]) {
+      showMsg("⚠ Fais d'abord le snapshot AVANT la GW pour pouvoir comparer.");
+      return;
+    }
+    setUpdating(true); showMsg("Récupération des scores réels...", 60000);
+
     try {
       const data = await gql(REAL_SCORES_QUERY, { slug: userSlug });
       if (data?.errors?.length) throw new Error(data.errors[0].message);
 
       const nodes = data?.data?.user?.cards?.nodes || [];
+      const weekSnap = snapshots[currentWeek];
       const newHistory = { ...history };
       let updated = 0;
 
@@ -327,61 +362,49 @@ function ProjectionsPage() {
         if (c.sport !== "FOOTBALL") return;
         const pSlug = c.anyPlayer?.slug;
         const scores = c.anyPlayer?.playerGameScores || [];
-        if (!pSlug || !scores.length || !pendingPredictions[pSlug]) return;
+        if (!pSlug || !scores.length || !weekSnap[pSlug]) return;
 
         const real = scores[0]?.score;
         if (!real || real <= 0) return;
 
-        const { predictions, weekKey } = pendingPredictions[pSlug];
-
-        // Clé unique : joueur + semaine ISO + score → zéro doublon possible
-        const entryKey = `${pSlug}_${weekKey}_${real}`;
+        // Clé unique : joueur + semaine + score réel → zéro doublon
+        const entryKey = `${pSlug}_${currentWeek}_${real}`;
 
         if (!newHistory[pSlug]) newHistory[pSlug] = [];
+        if (newHistory[pSlug].some(h => h.entryKey === entryKey)) return;
 
-        // Vérifier doublon
-        const alreadyExists = newHistory[pSlug].some(h => h.entryKey === entryKey);
-        if (alreadyExists) return;
-
+        // Comparaison avec le snapshot PRÉ-GW de la même semaine
+        const { predictions } = weekSnap[pSlug];
         const errors = {};
         MODELS.forEach(m => { errors[m.id] = Math.abs(predictions[m.id] - real); });
 
-        newHistory[pSlug].push({
-          entryKey,
-          weekKey,
-          gwLabel: `GW ${weekKey}`,
-          predictions,
-          real,
-          errors,
-        });
+        newHistory[pSlug].push({ entryKey, weekKey: currentWeek, predictions, real, errors });
         updated++;
       });
 
       setHistory(newHistory);
-      setUpdateMsg(updated > 0
-        ? `✓ ${updated} score${updated > 1 ? "s" : ""} mis à jour et sauvegardé${updated > 1 ? "s" : ""}`
+      showMsg(updated > 0
+        ? `✓ ${updated} score${updated > 1 ? "s" : ""} comparés avec le snapshot de ${currentWeek}`
         : "Aucun nouveau score — matchs pas encore joués ou déjà archivés."
       );
-    } catch (e) {
-      setUpdateMsg(`Erreur : ${e.message}`);
-    }
+    } catch (e) { showMsg(`Erreur : ${e.message}`); }
     setUpdating(false);
-    setTimeout(() => setUpdateMsg(""), 5000);
   };
 
-  const clearHistory = () => {
-    if (window.confirm("Effacer tout l'historique des projections ?")) {
-      setHistory({});
+  const clearAll = () => {
+    if (window.confirm("Effacer tout l'historique et tous les snapshots ?")) {
+      setHistory({}); setSnapshots({});
     }
   };
 
+  // Stats globales
   const globalMAE = useMemo(() => {
     const totals = {}; const counts = {};
     MODELS.forEach(m => { totals[m.id] = 0; counts[m.id] = 0; });
-    Object.values(history).forEach(gwList => {
-      gwList.forEach(gw => {
+    Object.values(history).forEach(list => {
+      list.forEach(h => {
         MODELS.forEach(m => {
-          if (gw.errors?.[m.id] !== undefined) { totals[m.id] += gw.errors[m.id]; counts[m.id]++; }
+          if (h.errors?.[m.id] !== undefined) { totals[m.id] += h.errors[m.id]; counts[m.id]++; }
         });
       });
     });
@@ -396,38 +419,36 @@ function ProjectionsPage() {
     return maes.reduce((a, b) => a.mae < b.mae ? a : b);
   }, [globalMAE]);
 
-  const totalGWs = useMemo(() => {
-    const keys = new Set();
-    Object.values(history).flat().forEach(h => keys.add(h.weekKey));
-    return keys.size;
-  }, [history]);
-
+  const totalGWs = useMemo(() => new Set(Object.values(history).flat().map(h => h.weekKey)).size, [history]);
   const totalEntries = useMemo(() => Object.values(history).flat().length, [history]);
+  const hasCurrentSnapshot = !!snapshots[currentWeek];
+  const snapshotWeeks = Object.keys(snapshots).sort();
 
   const wrap = { minHeight: "calc(100vh - 57px)", background: "#04060f", padding: "24px", fontFamily: "'Rajdhani', sans-serif" };
 
   // ── Login ──
   if (!userSlug) return (
     <div style={{ ...wrap, display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <div className="holo-border" style={{ background: "rgba(6,10,22,0.95)", borderRadius: 20, padding: "36px 32px", width: "100%", maxWidth: 460 }}>
+      <div className="holo-border" style={{ background: "rgba(6,10,22,0.95)", borderRadius: 20, padding: "36px 32px", width: "100%", maxWidth: 480 }}>
         <div style={{ fontSize: 11, letterSpacing: 5, color: "rgba(255,255,255,0.25)", fontFamily: "'Share Tech Mono', monospace", marginBottom: 8 }}>◈ SORAKI v1.0</div>
         <h1 className="holo-text" style={{ fontSize: 32, fontWeight: 700, letterSpacing: 2, marginBottom: 8 }}>PROJECTIONS</h1>
-        <div style={{ fontSize: 13, color: "rgba(255,255,255,0.3)", fontFamily: "'Share Tech Mono', monospace", marginBottom: 6, lineHeight: 1.7 }}>
-          6 modèles en compétition · Scores récupérés automatiquement<br />
-          Historique sauvegardé localement · Zéro doublon
-        </div>
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 20 }}>
-          {MODELS.map(m => (
-            <span key={m.id} style={{ fontSize: 10, fontFamily: "'Share Tech Mono', monospace", color: m.color, background: m.color + "15", border: `1px solid ${m.color}30`, borderRadius: 5, padding: "2px 8px" }}>{m.id} {m.label}</span>
-          ))}
+
+        {/* Workflow explanation */}
+        <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, padding: "14px 16px", marginBottom: 20, fontFamily: "'Share Tech Mono', monospace", fontSize: 12, lineHeight: 2 }}>
+          <div style={{ color: "#4de8ff" }}>① AVANT la GW</div>
+          <div style={{ color: "rgba(255,255,255,0.4)", marginLeft: 16 }}>→ Snapshot des projections M1-M6</div>
+          <div style={{ color: "#34d399", marginTop: 4 }}>② APRÈS les matchs</div>
+          <div style={{ color: "rgba(255,255,255,0.4)", marginLeft: 16 }}>→ Récupère les scores réels</div>
+          <div style={{ color: "rgba(255,255,255,0.4)", marginLeft: 16 }}>→ Compare avec le snapshot ①</div>
+          <div style={{ color: "#8a7fff", marginTop: 4 }}>③ AU FIL DU TEMPS</div>
+          <div style={{ color: "rgba(255,255,255,0.4)", marginLeft: 16 }}>→ Le meilleur modèle émerge</div>
         </div>
 
-        {/* Résumé historique existant */}
         {totalEntries > 0 && (
-          <div style={{ background: "rgba(77,232,255,0.05)", border: "1px solid rgba(77,232,255,0.15)", borderRadius: 10, padding: "10px 14px", marginBottom: 20, fontFamily: "'Share Tech Mono', monospace", fontSize: 12 }}>
-            <span style={{ color: "#4de8ff" }}>◈ Historique existant</span>
+          <div style={{ background: "rgba(77,232,255,0.05)", border: "1px solid rgba(77,232,255,0.15)", borderRadius: 10, padding: "10px 14px", marginBottom: 16, fontFamily: "'Share Tech Mono', monospace", fontSize: 12 }}>
+            <span style={{ color: "#4de8ff" }}>◈ Historique</span>
             <span style={{ color: "rgba(255,255,255,0.4)", marginLeft: 8 }}>{totalEntries} scores · {totalGWs} GW</span>
-            {bestModel && <span style={{ color: bestModel.color, marginLeft: 8 }}>· Meilleur : {bestModel.id}</span>}
+            {bestModel && <span style={{ color: bestModel.color, marginLeft: 8 }}>· Meilleur : {bestModel.id} ({bestModel.label})</span>}
           </div>
         )}
 
@@ -439,37 +460,88 @@ function ProjectionsPage() {
           onKeyDown={e => e.key === "Enter" && slugInput.trim() && loadPlayers(slugInput)}
         />
         <button className="main-btn" disabled={!slugInput.trim() || loading} onClick={() => loadPlayers(slugInput)}>
-          {loading ? "Chargement..." : "Lancer les projections →"}
+          {loading ? "Chargement..." : "Accéder aux projections →"}
         </button>
       </div>
     </div>
   );
 
   // ── Main ──
+  const currentSnap = snapshots[currentWeek] || {};
+
   return (
     <div style={wrap}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>
+
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16, flexWrap: "wrap", gap: 12 }}>
         <div>
           <h1 className="holo-text" style={{ fontSize: 24, fontWeight: 700, letterSpacing: 2 }}>PROJECTIONS</h1>
           <div style={{ fontSize: 12, color: "rgba(255,255,255,0.25)", fontFamily: "'Share Tech Mono', monospace", marginTop: 4 }}>
-            {players.length} cartes · {totalGWs} GW · {totalEntries} scores archivés · {userSlug}
+            {players.length} cartes · {totalGWs} GW · {totalEntries} scores · {userSlug}
           </div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          {updateMsg && <span style={{ fontSize: 12, color: updateMsg.startsWith("✓") ? "#34d399" : "#fca5a5", fontFamily: "'Share Tech Mono', monospace" }}>{updateMsg}</span>}
-          <button className="action-btn green" onClick={fetchRealScores} disabled={updating}>
-            {updating ? "Mise à jour..." : "↓ Récupérer les scores réels"}
-          </button>
-          <button className="action-btn gray" onClick={() => { setUserSlug(""); setPlayers([]); setPendingPredictions({}); }}>← Retour</button>
-          {totalEntries > 0 && <button className="action-btn red" onClick={clearHistory}>🗑</button>}
+          <button className="action-btn gray" onClick={() => { setUserSlug(""); setPlayers([]); }}>← Retour</button>
+          {totalEntries > 0 && <button className="action-btn red" onClick={clearAll}>🗑</button>}
         </div>
+      </div>
+
+      {/* Message */}
+      {msg && (
+        <div style={{ background: msg.startsWith("✓") ? "rgba(52,211,153,0.08)" : msg.startsWith("⚠") ? "rgba(251,191,36,0.08)" : "rgba(239,68,68,0.08)", border: `1px solid ${msg.startsWith("✓") ? "rgba(52,211,153,0.25)" : msg.startsWith("⚠") ? "rgba(251,191,36,0.25)" : "rgba(239,68,68,0.25)"}`, borderRadius: 10, padding: "10px 16px", marginBottom: 16, fontSize: 13, color: msg.startsWith("✓") ? "#34d399" : msg.startsWith("⚠") ? "#fbbf24" : "#fca5a5", fontFamily: "'Share Tech Mono', monospace" }}>
+          {msg}
+        </div>
+      )}
+
+      {/* Workflow actions */}
+      <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 14, padding: "16px 20px", marginBottom: 20 }}>
+        <div style={{ fontSize: 10, letterSpacing: 3, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono', monospace", marginBottom: 12 }}>
+          SEMAINE EN COURS : {currentWeek}
+        </div>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+
+          {/* Étape 1 */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", fontFamily: "'Share Tech Mono', monospace" }}>① AVANT la GW</div>
+            <button className={`action-btn ${hasCurrentSnapshot ? "gray" : "blue"}`}
+              onClick={snapshotProjections} disabled={snapshotting || hasCurrentSnapshot}>
+              {snapshotting ? "Snapshot..." : hasCurrentSnapshot ? `✓ Snapshot ${currentWeek}` : "📸 Snapshoter les projections"}
+            </button>
+          </div>
+
+          <div style={{ color: "rgba(255,255,255,0.15)", fontSize: 20, alignSelf: "flex-end", marginBottom: 4 }}>→</div>
+
+          {/* Étape 2 */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", fontFamily: "'Share Tech Mono', monospace" }}>② APRÈS les matchs</div>
+            <button className="action-btn green"
+              onClick={fetchRealScores} disabled={updating || !hasCurrentSnapshot}>
+              {updating ? "Mise à jour..." : "↓ Récupérer les scores réels"}
+            </button>
+          </div>
+        </div>
+
+        {/* Snapshots existants */}
+        {snapshotWeeks.length > 0 && (
+          <div style={{ marginTop: 12, display: "flex", gap: 6, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 10, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono', monospace", alignSelf: "center" }}>snapshots :</span>
+            {snapshotWeeks.map(w => {
+              const hasResults = Object.values(history).some(list => list.some(h => h.weekKey === w));
+              return (
+                <span key={w} className={`week-pill ${w === currentWeek ? "active" : hasResults ? "done" : ""}`}>
+                  {w} {hasResults ? "✓" : ""}
+                </span>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* MAE globale */}
       {totalGWs > 0 && (
         <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 14, padding: "16px 20px", marginBottom: 20 }}>
           <div style={{ fontSize: 10, letterSpacing: 3, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono', monospace", marginBottom: 12 }}>
-            ERREUR MOYENNE ABSOLUE — {totalGWs} GW · {totalEntries} données
+            ERREUR MOYENNE ABSOLUE — {totalGWs} GW · {totalEntries} comparaisons
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             {MODELS.map(m => {
@@ -486,42 +558,43 @@ function ProjectionsPage() {
           {bestModel && (
             <div style={{ marginTop: 10, fontSize: 12, color: "rgba(255,255,255,0.3)", fontFamily: "'Share Tech Mono', monospace" }}>
               Meilleur modèle : <span style={{ color: bestModel.color, fontWeight: 700 }}>{bestModel.id} — {bestModel.label}</span>
-              <span style={{ marginLeft: 8, color: "rgba(255,255,255,0.2)" }}>MAE = {globalMAE[bestModel.id]}</span>
+              <span style={{ marginLeft: 8 }}>MAE = {globalMAE[bestModel.id]}</span>
             </div>
           )}
         </div>
       )}
 
-      <div style={{ fontSize: 11, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono', monospace", marginBottom: 16 }}>
-        Semaine {getISOWeekKey()} · Projections en cours · Clique après les matchs pour mettre à jour
-      </div>
-
       {/* Player cards */}
-      {players.map(p => {
-        const preds = pendingPredictions[p.slug]?.predictions;
+      {!hasCurrentSnapshot && players.length === 0 && (
+        <div style={{ textAlign: "center", padding: "40px 0", color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono', monospace", fontSize: 13, lineHeight: 2 }}>
+          Clique "Snapshoter les projections" pour démarrer la semaine {currentWeek}
+        </div>
+      )}
+
+      {/* Affiche les joueurs du snapshot courant ou les cartes chargées */}
+      {(hasCurrentSnapshot ? Object.entries(currentSnap) : players.map(p => [p.slug, { ...computeModels(p), displayName: p.displayName, club: p.club, position: p.position, rarity: p.rarity, isHome: p.isHome, opponent: p.opponent, gameDate: p.gameDate, l15: p.l15, proj: p.proj, predictions: computeModels(p) }])).map(([pSlug, snapData]) => {
+        const preds = hasCurrentSnapshot ? snapData.predictions : snapData;
         if (!preds) return null;
         const maxPred = Math.max(...Object.values(preds), 1);
-        const playerHistory = history[p.slug] || [];
+        const playerHistory = history[pSlug] || [];
         const lastGW = playerHistory[playerHistory.length - 1];
-        const rarityColor = { unique: "#f59e0b", super_rare: "#c084fc", rare: "#ef4444", limited: "#f97316", common: "#6b7280" }[p.rarity?.toLowerCase()] || "#6b7280";
-        const posLabel = POS_LABEL[p.position] || "EXT";
+        const info = hasCurrentSnapshot ? snapData : players.find(p => p.slug === pSlug);
+        if (!info) return null;
+        const rarityColor = { unique: "#f59e0b", super_rare: "#c084fc", rare: "#ef4444", limited: "#f97316", common: "#6b7280" }[info.rarity?.toLowerCase()] || "#6b7280";
+        const posLabel = POS_LABEL[info.position] || "EXT";
         const posColor = POS_COLOR[posLabel] || "#888";
 
         return (
-          <div key={p.slug} className="proj-card">
+          <div key={pSlug} className="proj-card">
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
               <div style={{ width: 8, height: 8, borderRadius: "50%", background: rarityColor, boxShadow: `0 0 6px ${rarityColor}`, flexShrink: 0 }} />
               <span style={{ background: posColor + "14", color: posColor, border: `1px solid ${posColor}44`, borderRadius: 5, padding: "1px 7px", fontSize: 10, fontWeight: 700, fontFamily: "'Share Tech Mono', monospace" }}>{posLabel}</span>
               <div style={{ flex: 1 }}>
-                <div style={{ color: "#e2e8f0", fontSize: 15, fontWeight: 600, fontFamily: "'Rajdhani', sans-serif" }}>
-                  {p.displayName}
-                  {p.hasInjury && <span style={{ marginLeft: 6 }}>🤕</span>}
-                  {p.hasSuspension && <span style={{ marginLeft: 4 }}>🟥</span>}
-                </div>
+                <div style={{ color: "#e2e8f0", fontSize: 15, fontWeight: 600, fontFamily: "'Rajdhani', sans-serif" }}>{info.displayName}</div>
                 <div style={{ fontSize: 11, color: "rgba(255,255,255,0.28)", fontFamily: "'Share Tech Mono', monospace" }}>
-                  {p.club}
-                  {p.opponent && <span style={{ marginLeft: 8, color: p.isHome ? "#34d399" : "#f87171" }}>{p.isHome ? "DOM" : "EXT"} · {p.opponent} · {p.gameDate}</span>}
-                  {!p.opponent && <span style={{ marginLeft: 8, color: "#f87171" }}>NG</span>}
+                  {info.club}
+                  {info.opponent && <span style={{ marginLeft: 8, color: info.isHome ? "#34d399" : "#f87171" }}>{info.isHome ? "DOM" : "EXT"} · {info.opponent} · {info.gameDate}</span>}
+                  {!info.opponent && <span style={{ marginLeft: 8, color: "#f87171" }}>NG</span>}
                 </div>
               </div>
               {lastGW && (
@@ -535,6 +608,7 @@ function ProjectionsPage() {
             <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
               {MODELS.map(m => {
                 const pred = preds[m.id];
+                if (pred === undefined) return null;
                 const lastErr = lastGW?.errors?.[m.id];
                 const isBestLast = lastGW && MODELS.every(om => (lastGW.errors?.[om.id] ?? Infinity) >= lastErr);
                 return (
@@ -609,9 +683,7 @@ function OptimizerPage() {
       setResult(res);
       setCaptain(res.lineup["Forward"]?.slug || res.lineup["Midfielder"]?.slug || null);
       setStep("result");
-    } catch (e) {
-      setError(e.message || "Erreur inattendue."); setStep("home");
-    }
+    } catch (e) { setError(e.message || "Erreur inattendue."); setStep("home"); }
   }, []);
 
   const handleFilter = (f) => {
