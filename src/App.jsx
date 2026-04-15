@@ -964,9 +964,247 @@ export default function App() {
         <span className="holo-text" style={{ fontSize: 16, fontWeight: 700, letterSpacing: 3, marginRight: 8, cursor: "pointer" }} onClick={() => setPage("landing")}>◈ SORAKI</span>
         <button className={`nav-btn ${page === "optimizer" ? "active" : ""}`} onClick={() => setPage("optimizer")}>SO5 OPTIMIZER</button>
         <button className={`nav-btn ${page === "projections" ? "active" : ""}`} onClick={() => setPage("projections")}>PROJECTIONS</button>
+        <button className={`nav-btn ${page === "odds" ? "active" : ""}`} onClick={() => setPage("odds")}>COTES PL</button>
       </div>
       {page === "optimizer" && <OptimizerPage />}
       {page === "projections" && <ProjectionsPage />}
+      {page === "odds" && <OddsPage />}
+    </div>
+  );
+}
+
+// ─── ODDS PAGE ────────────────────────────────────────────────────────────────
+
+function OddsPage() {
+  const [matches, setMatches] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [remaining, setRemaining] = useState(null);
+  const [sortBy, setSortBy] = useState("date");
+
+  // Convertit cote décimale en probabilité implicite
+  const oddsToProb = (odd) => odd > 0 ? 1 / odd : 0;
+
+  // Normalise les probas (retire la marge bookmaker)
+  const normalizeProbs = (probs) => {
+    const total = probs.reduce((a, b) => a + b, 0);
+    return total > 0 ? probs.map(p => p / total) : probs;
+  };
+
+  const loadOdds = async () => {
+    setLoading(true); setError("");
+    try {
+      const res = await fetch("/api/odds");
+      const json = await res.json();
+      if (json.error) throw new Error(json.error);
+      setRemaining(json.remaining);
+
+      const processed = (json.data || []).map(match => {
+        // Agrège les cotes H2H sur tous les bookmakers
+        const homeOdds = [], drawOdds = [], awayOdds = [];
+        const overOdds = [], underOdds = [];
+
+        for (const bm of (match.bookmakers || [])) {
+          for (const market of (bm.markets || [])) {
+            if (market.key === "h2h") {
+              market.outcomes?.forEach(o => {
+                if (o.name === match.home_team) homeOdds.push(o.price);
+                else if (o.name === match.away_team) awayOdds.push(o.price);
+                else drawOdds.push(o.price);
+              });
+            }
+            if (market.key === "totals") {
+              market.outcomes?.forEach(o => {
+                if (o.name === "Over" && Math.abs((o.point || 0) - 2.5) < 0.1) overOdds.push(o.price);
+                if (o.name === "Under" && Math.abs((o.point || 0) - 2.5) < 0.1) underOdds.push(o.price);
+              });
+            }
+          }
+        }
+
+        const avg = arr => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+        const rawProbs = normalizeProbs([
+          oddsToProb(avg(homeOdds)),
+          oddsToProb(avg(drawOdds)),
+          oddsToProb(avg(awayOdds)),
+        ]);
+
+        const overAvg = avg(overOdds);
+        const underAvg = avg(underOdds);
+        const overProb = overAvg ? oddsToProb(overAvg) : null;
+        const underProb = underAvg ? oddsToProb(underAvg) : null;
+
+        const date = new Date(match.commence_time);
+
+        return {
+          id: match.id,
+          home: match.home_team,
+          away: match.away_team,
+          date,
+          dateStr: date.toLocaleDateString("fr-FR", { weekday: "short", day: "2-digit", month: "2-digit" }),
+          timeStr: date.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }),
+          homeProb: rawProbs[0],
+          drawProb: rawProbs[1],
+          awayProb: rawProbs[2],
+          overProb,
+          underProb,
+          bookmakers: match.bookmakers?.length || 0,
+        };
+      });
+
+      // Tri par date
+      processed.sort((a, b) => a.date - b.date);
+      setMatches(processed);
+    } catch (e) {
+      setError(e.message);
+    }
+    setLoading(false);
+  };
+
+  // Couleur selon probabilité
+  const probColor = (p) => {
+    if (p >= 0.6) return "#34d399";
+    if (p >= 0.4) return "#4de8ff";
+    if (p >= 0.25) return "#fbbf24";
+    return "#f87171";
+  };
+
+  // Barre de probabilité
+  const ProbBar = ({ label, prob, color, bold }) => (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+      <span style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", fontFamily: "'Share Tech Mono',monospace", minWidth: 28, textAlign: "right" }}>{label}</span>
+      <div style={{ flex: 1, height: 6, background: "rgba(255,255,255,0.05)", borderRadius: 3, overflow: "hidden" }}>
+        <div style={{ width: `${Math.round(prob * 100)}%`, height: "100%", background: color, borderRadius: 3, transition: "width 0.5s ease" }} />
+      </div>
+      <span style={{ fontSize: 13, fontFamily: "'Share Tech Mono',monospace", color: bold ? color : "#e2e8f0", fontWeight: bold ? 700 : 400, minWidth: 36, textAlign: "right" }}>
+        {Math.round(prob * 100)}%
+      </span>
+    </div>
+  );
+
+  const wrap = { minHeight: "calc(100vh - 57px)", background: "#04060f", padding: "24px", fontFamily: "'Rajdhani', sans-serif" };
+
+  // Grouper par jour
+  const byDay = matches.reduce((acc, m) => {
+    const key = m.dateStr;
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(m);
+    return acc;
+  }, {});
+
+  return (
+    <div style={wrap}>
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>
+        <div>
+          <h1 className="holo-text" style={{ fontSize: 24, fontWeight: 700, letterSpacing: 2 }}>COTES PL</h1>
+          <div style={{ fontSize: 12, color: "rgba(255,255,255,0.25)", fontFamily: "'Share Tech Mono',monospace", marginTop: 4 }}>
+            Probabilités calculées depuis {matches.length > 0 ? `${matches[0]?.bookmakers} bookmakers en moyenne` : "les bookmakers"}
+            {remaining && <span style={{ marginLeft: 8, color: "rgba(77,232,255,0.5)" }}>· {remaining} crédits restants</span>}
+          </div>
+        </div>
+        <button className="action-btn green" onClick={loadOdds} disabled={loading}>
+          {loading ? "Chargement..." : "↓ Charger les cotes"}
+        </button>
+      </div>
+
+      {error && (
+        <div style={{ background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 10, padding: "12px 16px", color: "#fca5a5", fontSize: 13, marginBottom: 16, fontFamily: "'Share Tech Mono',monospace" }}>
+          {error}
+        </div>
+      )}
+
+      {matches.length === 0 && !loading && (
+        <div style={{ textAlign: "center", paddingTop: 80, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono',monospace", fontSize: 13, lineHeight: 2.2 }}>
+          Clique sur "Charger les cotes" pour voir les prochains matchs PL<br />
+          Probabilités calculées depuis les cotes de 15+ bookmakers UK<br />
+          Marge bookmaker retirée pour des probabilités réelles
+        </div>
+      )}
+
+      {/* Matchs groupés par jour */}
+      {Object.entries(byDay).map(([day, dayMatches]) => (
+        <div key={day} style={{ marginBottom: 28 }}>
+          {/* Titre du jour */}
+          <div style={{ fontSize: 10, letterSpacing: 4, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono',monospace", textTransform: "uppercase", marginBottom: 12, paddingBottom: 8, borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+            {day}
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: 12 }}>
+            {dayMatches.map(m => {
+              const favorite = m.homeProb > m.awayProb ? "home" : "away";
+              const favProb = Math.max(m.homeProb, m.awayProb);
+              const isClose = Math.abs(m.homeProb - m.awayProb) < 0.1;
+
+              return (
+                <div key={m.id} className="proj-card" style={{ padding: "18px 20px" }}>
+                  {/* Teams + heure */}
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                        <span style={{ fontSize: 15, fontWeight: 700, color: favorite === "home" ? "#f1f5f9" : "rgba(255,255,255,0.5)", fontFamily: "'Rajdhani',sans-serif" }}>
+                          {m.home}
+                        </span>
+                        {favorite === "home" && (
+                          <span style={{ fontSize: 10, background: "rgba(52,211,153,0.1)", color: "#34d399", border: "1px solid rgba(52,211,153,0.25)", borderRadius: 4, padding: "1px 6px", fontFamily: "'Share Tech Mono',monospace" }}>
+                            FAV {Math.round(favProb * 100)}%
+                          </span>
+                        )}
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ fontSize: 15, fontWeight: 700, color: favorite === "away" ? "#f1f5f9" : "rgba(255,255,255,0.5)", fontFamily: "'Rajdhani',sans-serif" }}>
+                          {m.away}
+                        </span>
+                        {favorite === "away" && (
+                          <span style={{ fontSize: 10, background: "rgba(52,211,153,0.1)", color: "#34d399", border: "1px solid rgba(52,211,153,0.25)", borderRadius: 4, padding: "1px 6px", fontFamily: "'Share Tech Mono',monospace" }}>
+                            FAV {Math.round(favProb * 100)}%
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div style={{ textAlign: "right", flexShrink: 0 }}>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: "#4de8ff", fontFamily: "'Share Tech Mono',monospace" }}>{m.timeStr}</div>
+                      <div style={{ fontSize: 10, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono',monospace", marginTop: 2 }}>{m.bookmakers} bkm</div>
+                      {isClose && (
+                        <div style={{ fontSize: 9, color: "#fbbf24", fontFamily: "'Share Tech Mono',monospace", marginTop: 2 }}>SERRÉ</div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Barres H/D/A */}
+                  <ProbBar label="DOM" prob={m.homeProb} color={probColor(m.homeProb)} bold={favorite === "home"} />
+                  <ProbBar label="NUL" prob={m.drawProb} color="#888780" bold={false} />
+                  <ProbBar label="EXT" prob={m.awayProb} color={probColor(m.awayProb)} bold={favorite === "away"} />
+
+                  {/* Over/Under */}
+                  {m.overProb !== null && (
+                    <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid rgba(255,255,255,0.05)", display: "flex", gap: 12 }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 9, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono',monospace", letterSpacing: 2, marginBottom: 4 }}>OVER 2.5</div>
+                        <div style={{ height: 4, background: "rgba(255,255,255,0.05)", borderRadius: 2, overflow: "hidden" }}>
+                          <div style={{ width: `${Math.round(m.overProb * 100)}%`, height: "100%", background: m.overProb > 0.55 ? "#34d399" : "#fbbf24", borderRadius: 2 }} />
+                        </div>
+                        <div style={{ fontSize: 12, color: m.overProb > 0.55 ? "#34d399" : "#fbbf24", fontFamily: "'Share Tech Mono',monospace", marginTop: 3, fontWeight: 700 }}>
+                          {Math.round(m.overProb * 100)}%
+                        </div>
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 9, color: "rgba(255,255,255,0.2)", fontFamily: "'Share Tech Mono',monospace", letterSpacing: 2, marginBottom: 4 }}>UNDER 2.5</div>
+                        <div style={{ height: 4, background: "rgba(255,255,255,0.05)", borderRadius: 2, overflow: "hidden" }}>
+                          <div style={{ width: `${Math.round(m.underProb * 100)}%`, height: "100%", background: "#8a7fff", borderRadius: 2 }} />
+                        </div>
+                        <div style={{ fontSize: 12, color: "#8a7fff", fontFamily: "'Share Tech Mono',monospace", marginTop: 3 }}>
+                          {Math.round(m.underProb * 100)}%
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
